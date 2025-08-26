@@ -1,0 +1,12 @@
+tools:
+  - name: Hello & About
+    description: Simple hello form and about page.
+    file: streamlit_app/tools/hello.py
+
+  - name: Resume Builder
+    description: Create a quick CV / resume interactively.
+    file: streamlit_app/tools/resume.py
+
+  - name: Notes
+    description: Write and save quick notes.
+    file: streamlit_app/tools/notes.py
