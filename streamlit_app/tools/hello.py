@@ -1,9 +1,15 @@
 import streamlit as st
 
 def render():
-    st.header("Hello 👋")
+    st.header("👋 Hello & About")
+    st.write("Welcome to **Milkbox AI**, your lightweight AI toolbox.")
+
     name = st.text_input("Your name", value="world")
     if st.button("Say hello"):
-        st.success(f"Hello, **{name}**! 👋 Nice to meet you.")
-    with st.expander("About this tool"):
-        st.write("This is a friendly starter tool used to verify the dynamic loader works.")
+        st.success(f"Hello, {name}!")
+
+    st.subheader("About")
+    st.write(
+        "Milkbox AI is a lightweight toolbox. "
+        "This prototype includes Hello, Resume Builder, and Notes."
+    )
