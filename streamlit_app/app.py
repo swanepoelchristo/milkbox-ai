@@ -1,39 +1,58 @@
+import importlib
+from pathlib import Path
+import yaml
 import streamlit as st
 
-st.set_page_config(page_title="Milkbox AI Toolbox", page_icon="🧰", layout="wide")
+# ---------- load tool config ----------
+CONFIG_PATH = Path(__file__).resolve().parent.parent / "tools.yaml"
 
-# Sidebar for tool selection
-st.sidebar.title("🧰 Milkbox Toolbox")
-tool = st.sidebar.selectbox(
-    "Choose a tool",
-    ["Hello & About", "Resume Builder", "Notes"]
-)
+@st.cache_data(show_spinner=False)
+def load_tools_config():
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    tools = data.get("tools", [])
+    norm = []
+    for t in tools:
+        norm.append({
+            "key": t.get("key"),
+            "label": t.get("label") or t.get("key", "Untitled"),
+            "module": t.get("module"),
+        })
+    return norm
 
-# Tool: Hello & About
-if tool == "Hello & About":
-    st.title("👋 Hello & About")
-    st.write("Welcome to **Milkbox AI**, your lightweight AI toolbox.")
-    name = st.text_input("Your name", "world")
-    if st.button("Say hello"):
-        st.success(f"Hello, {name}! 👋")
-    st.markdown("---")
-    st.subheader("About")
-    st.write("Milkbox AI is a lightweight toolbox. This prototype includes Hello, Resume Builder, and Notes.")
+def load_tool_module(module_path: str):
+    try:
+        return importlib.import_module(module_path)
+    except Exception as e:
+        st.error(f"Failed to import `{module_path}`: {e}")
+        return None
 
-# Tool: Resume Builder
-elif tool == "Resume Builder":
-    st.title("📄 Resume Builder")
-    st.write("This is where the resume builder logic will go.")
-    name = st.text_input("Full Name")
-    role = st.text_input("Role")
-    summary = st.text_area("Summary")
-    if st.button("Generate Resume"):
-        st.success(f"Generated resume for {name}, {role}.")
+def render_tool(module):
+    render_fn = getattr(module, "render", None)
+    if callable(render_fn):
+        render_fn()
+    else:
+        st.warning("This tool does not define a `render()` function.")
 
-# Tool: Notes
-elif tool == "Notes":
-    st.title("📝 Notes")
-    st.write("Simple notes section to test input/output.")
-    note = st.text_area("Write your note here")
-    if st.button("Save Note"):
-        st.success("Note saved (in memory for now).")
+# ---------- UI ----------
+st.set_page_config(page_title="Milkbox AI Toolbox", page_icon="🍨", layout="wide")
+
+st.sidebar.title("Milkbox AI")
+st.sidebar.caption("Toolbox")
+
+tools = load_tools_config()
+if not tools:
+    st.error("No tools found in `tools.yaml`.")
+else:
+    labels = [t["label"] for t in tools]
+    choice = st.sidebar.selectbox("Select a tool", labels, index=0)
+    current = tools[labels.index(choice)]
+
+    st.sidebar.markdown("---")
+    st.sidebar.caption(f"Key: `{current['key']}`")
+    st.sidebar.caption(f"Module: `{current['module']}`")
+
+    mod = load_tool_module(current["module"])
+    if mod:
+        render_tool(mod)
+
