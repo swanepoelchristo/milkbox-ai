@@ -1,0 +1,80 @@
+name: Create Repo From Template
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        description: "New repo name"
+        required: true
+      template:
+        description: "Template key: fastapi|streamlit"
+        required: true
+        default: "fastapi"
+      private:
+        description: "Private? true|false"
+        required: true
+        default: "true"
+
+jobs:
+  create:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    env:
+      OWNER: "swanepoelchristo"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+
+      - name: Create repo from template + basic protection + labels
+        uses: actions/github-script@v7
+        env:
+          ORG_ADMIN_PAT: ${{ secrets.ORG_ADMIN_PAT }}
+        with:
+          github-token: ${{ env.ORG_ADMIN_PAT }}
+          script: |
+            // 'core' and 'github' are provided by github-script. Do NOT require them.
+            const owner = process.env.OWNER;
+
+            const name = core.getInput('name');
+            const templateKey = core.getInput('template');
+            const isPrivate = (core.getInput('private') || 'true') === 'true';
+            const tmplRepo = templateKey === 'fastapi' ? 'template-fastapi' : 'template-streamlit';
+
+            // 1) Create from template (source repo must be marked "Template repository")
+            await github.request('POST /repos/{template_owner}/{template_repo}/generate', {
+              template_owner: owner,
+              template_repo: tmplRepo,
+              owner,
+              name,
+              private: isPrivate,
+              include_all_branches: false
+            });
+
+            // 2) Protect main (minimal)
+            try {
+              await github.request('PUT /repos/{owner}/{repo}/branches/{branch}/protection', {
+                owner, repo: name, branch: 'main',
+                required_status_checks: null,
+                enforce_admins: true,
+                required_pull_request_reviews: { required_approving_review_count: 1 },
+                restrictions: null
+              });
+            } catch (e) {
+              core.warning('Branch protection skipped: ' + (e?.message || e));
+            }
+
+            // 3) Add a few labels (best effort)
+            const labels = [
+              { name: 'MVP', color: '3E4B9E' },
+              { name: 'bug', color: 'D73A4A' },
+              { name: 'enhancement', color: 'A2EEEF' }
+            ];
+            for (const l of labels) {
+              try {
+                await github.request('POST /repos/{owner}/{repo}/labels', { owner, repo: name, ...l });
+              } catch (e) {
+                core.warning('Label add failed: ' + l.name + ' — ' + (e?.message || e));
+              }
+            }
