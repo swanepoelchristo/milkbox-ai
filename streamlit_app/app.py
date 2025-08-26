@@ -17,7 +17,7 @@ tab1, tab2, tab3 = st.tabs(["Hello & About", "Resume Builder", "Notes"])
 # --- Tab 1: Hello & About ---
 with tab1:
     st.subheader("Hello 👋")
-    name = st.text_input("Your name", value="world", key="hello_name")
+    name = st.text_input("Your name", value="christo", key="hello_name")
     if st.button("Say hello"):
         st.success(f"Hello, **{name}**! Milkbox is alive. ✅")
 
