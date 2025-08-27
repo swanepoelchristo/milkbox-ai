@@ -1,186 +1,182 @@
 import importlib
 from pathlib import Path
-import yaml
+from typing import Any, Dict, List, Optional
+
 import streamlit as st
+import yaml
 
 # ─────────────────────────────────────────────────────────
 # Config
+# tools.yaml lives at the REPO ROOT (not inside streamlit_app/)
 # ─────────────────────────────────────────────────────────
-TOOLS_FILE = Path(__file__).resolve().parent / "tools.yaml"
+TOOLS_FILE = Path(__file__).resolve().parent.parent / "tools.yaml"
 
 
 # ─────────────────────────────────────────────────────────
-# YAML loading
+# Data loading
 # ─────────────────────────────────────────────────────────
-def load_tools():
+def load_tools_config() -> Dict[str, Any]:
+    """
+    Read tools.yaml from the repo root and return the parsed dict.
+    Expected structure:
+      tools:
+        - key: invoice_gen
+          label: Invoice Generator
+          module: tools.invoice_gen
+          section: Free
+          description: ...
+    """
     try:
         with open(TOOLS_FILE, "r", encoding="utf-8") as f:
             cfg = yaml.safe_load(f) or {}
-        tools = cfg.get("tools", []) or []
-        # Normalize: keep only dicts with at least a key + module
-        normalized = []
-        for t in tools:
-            if isinstance(t, dict) and t.get("key") and t.get("module"):
-                normalized.append(t)
-        return normalized
+    except FileNotFoundError as e:
+        st.error(
+            f"Failed to read tools.yaml: {e}\n\n"
+            "Make sure tools.yaml is at the repository root."
+        )
+        return {"tools": []}
     except Exception as e:
-        st.error(f"Failed to read tools.yaml: {e}")
-        return []
+        st.error(f"Error parsing tools.yaml: {e}")
+        return {"tools": []}
+    return cfg
 
 
-# ─────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────
-def _find_tool_by_key(tools, key: str):
+def normalize_tools(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return a list of tool dicts with safe defaults."""
+    items = raw.get("tools", []) or []
+    cleaned = []
+    for t in items:
+        if not isinstance(t, dict):
+            continue
+        key = str(t.get("key", "")).strip()
+        module = str(t.get("module", "")).strip()
+        label = str(t.get("label", key)).strip() or key
+        section = t.get("section")  # optional
+        description = t.get("description", "")
+
+        if key and module:
+            cleaned.append(
+                {
+                    "key": key,
+                    "label": label,
+                    "module": module,
+                    "section": section,
+                    "description": description,
+                }
+            )
+    return cleaned
+
+
+def tool_by_key(tools: List[Dict[str, Any]], key: str) -> Optional[Dict[str, Any]]:
     for t in tools:
-        if t.get("key") == key:
+        if t["key"] == key:
             return t
     return None
 
 
-def _module_importable(mod_path: str) -> bool:
+# ─────────────────────────────────────────────────────────
+# Sidebar UI
+# ─────────────────────────────────────────────────────────
+def render_sidebar(tools: List[Dict[str, Any]]) -> Optional[str]:
     """
-    Returns True if module 'streamlit_app.<mod_path>' can be imported, else False.
+    Render a grouped sidebar if 'section' is present in YAML.
+    Falls back to a single list otherwise.
+    Returns the selected tool key.
     """
-    try:
-        importlib.import_module(f"streamlit_app.{mod_path}")  # e.g., "tools.invoice_gen"
-        return True
-    except Exception:
-        return False
+    st.sidebar.title("Milkbox AI Toolbox")
+
+    if not tools:
+        st.sidebar.info("No tools found in tools.yaml.")
+        return None
+
+    # Decide grouping
+    has_sections = any(t.get("section") for t in tools)
+    selected_key = st.session_state.get("selected_tool")
+
+    if has_sections:
+        # Group by 'section' while keeping insertion order
+        groups: Dict[str, List[Dict[str, Any]]] = {}
+        for t in tools:
+            sec = t.get("section") or "Tools"
+            groups.setdefault(sec, []).append(t)
+
+        for sec_name, items in groups.items():
+            st.sidebar.markdown(f"### {sec_name}")
+            for t in items:
+                if st.sidebar.button(f"Open: {t['label']}", key=f"btn_{t['key']}"):
+                    selected_key = t["key"]
+    else:
+        # Simple radio list
+        labels = [t["label"] for t in tools]
+        keys = [t["key"] for t in tools]
+        default_index = 0
+        if selected_key in keys:
+            default_index = keys.index(selected_key)
+        idx = st.sidebar.radio("Choose a tool", options=list(range(len(keys))), format_func=lambda i: labels[i], index=default_index)
+        selected_key = keys[idx]
+
+    # Persist selection
+    st.session_state["selected_tool"] = selected_key
+    return selected_key
 
 
-def _get_tool_if_ready(tools, key: str):
+# ─────────────────────────────────────────────────────────
+# Main area
+# ─────────────────────────────────────────────────────────
+def render_selected_tool(tools: List[Dict[str, Any]], key: Optional[str]) -> None:
     """
-    Returns the tool dict if (a) key exists in yaml and (b) module is importable.
-    Otherwise returns None.
+    Import and render the selected tool.
+
+    NOTE: We import EXACTLY what the YAML specifies in 'module'
+    (e.g., 'tools.invoice_gen'), without auto-prefixing. This keeps
+    imports consistent and avoids ModuleNotFoundError for valid paths.
     """
-    t = _find_tool_by_key(tools, key)
+    if not key:
+        st.header("Milkbox AI Toolbox")
+        st.write("Select a tool from the sidebar to begin.")
+        return
+
+    t = tool_by_key(tools, key)
     if not t:
-        return None
-    mod_path = t.get("module", "")
-    if not mod_path:
-        return None
-    return t if _module_importable(mod_path) else None
+        st.error(f"Tool '{key}' not found in tools.yaml")
+        return
 
-
-def _select_tool(tool_key: str):
-    """
-    Persist selection in session and rerun.
-    """
-    st.session_state["selected_tool_key"] = tool_key
-    st.rerun()
-
-
-def render_selected_tool(tool_dict: dict):
-    """
-    Safely import and render the selected tool.
-    """
-    module_path = tool_dict.get("module")
-    label = tool_dict.get("label", tool_dict.get("key", "Tool"))
-
+    module_path = t["module"]
     try:
-        module = importlib.import_module(f"streamlit_app.{module_path}")
-    except Exception as e:
+        mod = importlib.import_module(module_path)
+    except ModuleNotFoundError as e:
         st.error(
-            f"Could not import module for **{label}** "
-            f"(`streamlit_app.{module_path}`):\n\n{e}"
+            f"Couldn't import module `{module_path}`.\n\n"
+            "Make sure the module path in tools.yaml matches the file on disk.\n"
+            f"Details: {e}"
         )
         return
-
-    if not hasattr(module, "render"):
-        st.error(f"Module `{module_path}` has no `render()` function.")
+    except Exception as e:
+        st.error(f"Error importing `{module_path}`: {e}")
         return
 
-    try:
-        module.render()
-    except Exception as e:
-        st.error(f"Error while rendering **{label}**: {e}")
+    # Render
+    if hasattr(mod, "render"):
+        try:
+            mod.render()
+        except Exception as e:
+            st.error(f"Error while rendering `{t['label']}`: {e}")
+    else:
+        st.error(f"Module `{module_path}` has no function `render()`.")
 
 
 # ─────────────────────────────────────────────────────────
-# UI
+# App entrypoint
 # ─────────────────────────────────────────────────────────
-def render_sidebar(tools_list):
-    st.sidebar.header("CV Builder")
-    st.sidebar.caption("International CV builder with import-from-file and DOCX/PDF exports.")
-
-    t = _get_tool_if_ready(tools_list, "cv_builder")
-    if t and st.sidebar.button("Open: CV Builder", use_container_width=True):
-        _select_tool(t["key"])
-
-    st.sidebar.header("Bar Tools (ABV & Tips)")
-    st.sidebar.caption("Quick ABV/pure alcohol calculator and tip/bill splitter.")
-
-    t = _get_tool_if_ready(tools_list, "bar_tools")
-    if t and st.sidebar.button("Open: Bar Tools (ABV & Tips)", use_container_width=True):
-        _select_tool(t["key"])
-
-    st.sidebar.header("Pro")
-    st.sidebar.caption(
-        "International CV Builder (Pro)\n\nPro templates, locale rules, advanced formatting, and premium exports."
-    )
-
-    t = _get_tool_if_ready(tools_list, "cv_builder_pro")
-    if t and st.sidebar.button("Open: International CV Builder (Pro)", use_container_width=True):
-        _select_tool(t["key"])
-
-    st.sidebar.divider()
-    if st.sidebar.button("🏡 Home", use_container_width=True):
-        st.session_state.pop("selected_tool_key", None)
-        st.rerun()
-
-    # Optional: quick access to all available tools (debug/utility)
-    with st.sidebar.expander("All tools", expanded=False):
-        for t in tools_list:
-            key = t["key"]
-            label = t.get("label", key)
-            mod = t["module"]
-            ok = _module_importable(mod)
-            col1, col2 = st.columns([1, 1])
-            with col1:
-                st.write(f"• {label}")
-            with col2:
-                if ok:
-                    if st.button(f"Open", key=f"open_{key}"):
-                        _select_tool(key)
-                else:
-                    st.caption("not installed")
-
-
-def render_home():
-    st.title("Milkbox AI Toolbox")
-    st.write("Welcome! Pick a tool from the left, or choose one below.")
-
-    # Example: show a small grid of ready tools (from YAML)
-    tools_list = load_tools()
-    ready = [t for t in tools_list if _module_importable(t["module"])]
-    if ready:
-        st.subheader("Available tools")
-        for t in ready:
-            st.markdown(f"- **{t.get('label', t['key'])}** — `{t['key']}`")
-
-
 def main():
     st.set_page_config(page_title="Milkbox AI Toolbox", layout="wide")
-    tools_list = load_tools()
 
-    # Sidebar
-    render_sidebar(tools_list)
+    cfg = load_tools_config()
+    tools = normalize_tools(cfg)
 
-    # Main panel — render selected tool or home
-    selected_key = st.session_state.get("selected_tool_key")
-    if selected_key:
-        tool = _find_tool_by_key(tools_list, selected_key)
-        if tool:
-            st.title(tool.get("label", selected_key))
-            render_selected_tool(tool)
-        else:
-            st.error(f"Selected tool `{selected_key}` not found in tools.yaml.")
-            render_home()
-    else:
-        render_home()
+    selected = render_sidebar(tools)
+    render_selected_tool(tools, selected)
 
 
 if __name__ == "__main__":
     main()
-
