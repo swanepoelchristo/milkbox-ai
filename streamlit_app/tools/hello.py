@@ -3,13 +3,14 @@ import streamlit as st
 def render():
     st.header("👋 Hello & About")
     st.write("Welcome to **Milkbox AI**, your lightweight AI toolbox.")
-
-    name = st.text_input("Your name", value="world")
-    if st.button("Say hello"):
-        st.success(f"Hello, {name}!")
-
+    with st.form("hello_form", clear_on_submit=False):
+        name = st.text_input("Your name", value="world")
+        submitted = st.form_submit_button("Say hello")
+    if submitted:
+        st.success(f"Hello, **{name}**! 👋")
+    st.divider()
     st.subheader("About")
     st.write(
-        "Milkbox AI is a lightweight toolbox. "
-        "This prototype includes Hello, Resume Builder, and Notes."
+        "This prototype includes a dynamic tool menu loaded from `tools.yaml`. "
+        "Adding a new tool file + yaml entry makes it appear automatically."
     )
