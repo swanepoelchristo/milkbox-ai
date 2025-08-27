@@ -1,256 +1,466 @@
 import io
-from datetime import datetime
-from typing import List, Dict
+from datetime import date
+from typing import List, Dict, Any
 
 import streamlit as st
 
-# ---------------------------------------------------------
-# Small helpers
-# ---------------------------------------------------------
-def _lines(text: str) -> List[str]:
-    """Normalize comma- or newline-separated input → list of non-empty trimmed lines."""
-    if not text:
-        return []
-    if "," in text and "\n" not in text:
-        parts = [p.strip() for p in text.split(",")]
-    else:
-        parts = [p.strip() for p in text.splitlines()]
-    return [p for p in parts if p]
-
-def _md_section(title: str, items: List[str]) -> str:
-    if not items:
-        return ""
-    out = [f"## {title}"]
-    out += [f"- {x}" for x in items]
-    out.append("")  # blank line
-    return "\n".join(out)
-
-def _md_header(name: str, title: str, contact: Dict[str, str]) -> str:
-    lines = [f"# {name or 'Your Name'}"]
-    if title.strip():
-        lines.append(f"**{title.strip()}**")
-    parts = []
-    if contact.get("email"):   parts.append(f"📧 {contact['email']}")
-    if contact.get("phone"):   parts.append(f"📞 {contact['phone']}")
-    if contact.get("website"): parts.append(f"🌐 {contact['website']}")
-    if contact.get("linkedin"):parts.append(f"🔗 {contact['linkedin']}")
-    if contact.get("github"):  parts.append(f"🐙 {contact['github']}")
-    if parts:
-        lines.append(" | ".join(parts))
-    lines.append("")  # blank
-    return "\n".join(lines)
-
-def _to_markdown(name, title, contact, summary, skills, experience, education) -> str:
-    md = []
-    md.append(_md_header(name, title, contact))
-    if summary.strip():
-        md += ["## Summary", summary.strip(), ""]
-    md.append(_md_section("Skills", skills))
-    md.append(_md_section("Experience", experience))
-    md.append(_md_section("Education", education))
-    return "\n".join([x for x in md if x is not None])
-
-# ---------------------------------------------------------
-# DOCX export (python-docx)
-# ---------------------------------------------------------
-def build_docx(name, title, contact, summary, skills, experience, education) -> bytes:
+# Optional deps for export
+try:
     from docx import Document
-    from docx.shared import Pt, Inches
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.shared import Pt
+except Exception:  # pragma: no cover
+    Document = None
+
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+except Exception:  # pragma: no cover
+    canvas = None
+
+
+# ─────────────────────────────────────────────────────────
+# Presets / i18n-lite
+# ─────────────────────────────────────────────────────────
+COUNTRY_PRESETS = {
+    "International": {
+        "date_fmt": "%Y-%m",
+        "sections": ["Summary", "Experience", "Education", "Skills", "Links"],
+        "labels": {"phone": "Phone", "email": "Email", "location": "Location"},
+    },
+    "United States": {
+        "date_fmt": "%b %Y",
+        "sections": ["Summary", "Experience", "Education", "Skills", "Links"],
+        "labels": {"phone": "Phone", "email": "Email", "location": "Location"},
+    },
+    "United Kingdom": {
+        "date_fmt": "%b %Y",
+        "sections": ["Summary", "Experience", "Education", "Skills", "Links"],
+        "labels": {"phone": "Tel", "email": "Email", "location": "Location"},
+    },
+    "Netherlands / Belgium": {
+        "date_fmt": "%m-%Y",
+        "sections": ["Summary", "Experience", "Education", "Skills", "Links"],
+        "labels": {"phone": "Tel", "email": "E-mail", "location": "Locatie"},
+    },
+    "South Africa": {
+        "date_fmt": "%b %Y",
+        "sections": ["Summary", "Experience", "Education", "Skills", "Links"],
+        "labels": {"phone": "Cell", "email": "Email", "location": "Location"},
+    },
+}
+
+DEFAULT_COUNTRY = "International"
+
+
+# ─────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────
+def _init_state() -> None:
+    ss = st.session_state
+    ss.setdefault("cv_personal", {
+        "full_name": "",
+        "role": "",
+        "email": "",
+        "phone": "",
+        "location": "",
+        "website": "",
+        "linkedin": "",
+        "github": "",
+    })
+    ss.setdefault("cv_summary", "")
+    ss.setdefault("cv_experience", [])        # list of dicts
+    ss.setdefault("cv_education", [])         # list of dicts
+    ss.setdefault("cv_skills", [])            # list of str
+    ss.setdefault("cv_links", [])             # list of dicts
+    ss.setdefault("cv_country", DEFAULT_COUNTRY)
+    ss.setdefault("cv_template", "Clean")
+
+
+def _two_cols(label_left: str, label_right: str):
+    left, right = st.columns(2)
+    with left:
+        st.markdown(f"**{label_left}**")
+    with right:
+        st.markdown(f"**{label_right}**")
+    return left, right
+
+
+def _add_experience_form() -> None:
+    st.subheader("Add Experience")
+    with st.form("form_exp", clear_on_submit=True):
+        c1, c2 = st.columns(2)
+        with c1:
+            title = st.text_input("Job title*", key="exp_title")
+            start = st.date_input("Start date*", key="exp_start", value=date(2020, 1, 1))
+        with c2:
+            company = st.text_input("Company*", key="exp_company")
+            end = st.date_input("End date (leave if current)", key="exp_end", value=date.today())
+            current = st.checkbox("Current role", value=False, key="exp_current")
+
+        desc = st.text_area("Responsibilities / achievements (• one per line)", key="exp_desc", height=120,
+                            placeholder="• Shipped X\n• Increased Y by 30%")
+
+        submitted = st.form_submit_button("➕ Add experience")
+        if submitted:
+            if not title or not company:
+                st.warning("Please provide *Job title* and *Company*.")
+                return
+            bullets = [ln.strip("• ").strip() for ln in desc.splitlines() if ln.strip()]
+            st.session_state.cv_experience.append({
+                "title": title, "company": company, "start": start, "end": end if not current else None,
+                "current": current, "bullets": bullets
+            })
+            st.success("Experience added.")
+
+
+def _add_education_form() -> None:
+    st.subheader("Add Education")
+    with st.form("form_edu", clear_on_submit=True):
+        c1, c2 = st.columns(2)
+        with c1:
+            degree = st.text_input("Degree / Program*", key="edu_degree")
+            start = st.date_input("Start date*", key="edu_start", value=date(2018, 1, 1))
+        with c2:
+            institution = st.text_input("Institution*", key="edu_institution")
+            end = st.date_input("End date*", key="edu_end", value=date(2022, 1, 1))
+        notes = st.text_input("Notes (e.g., honors, GPA)", key="edu_notes")
+
+        submitted = st.form_submit_button("➕ Add education")
+        if submitted:
+            if not degree or not institution:
+                st.warning("Please provide *Degree* and *Institution*.")
+                return
+            st.session_state.cv_education.append({
+                "degree": degree, "institution": institution, "start": start, "end": end, "notes": notes
+            })
+            st.success("Education added.")
+
+
+def _add_skill_form() -> None:
+    st.subheader("Add Skill")
+    with st.form("form_skill", clear_on_submit=True):
+        skill = st.text_input("Skill (e.g., Python, Leadership)*", key="skill_val")
+        submitted = st.form_submit_button("➕ Add skill")
+        if submitted:
+            if not skill.strip():
+                st.warning("Please enter a skill.")
+                return
+            st.session_state.cv_skills.append(skill.strip())
+            st.success("Skill added.")
+
+
+def _add_link_form() -> None:
+    st.subheader("Add Link")
+    with st.form("form_link", clear_on_submit=True):
+        label = st.text_input("Label (e.g., Portfolio, Kaggle)", key="link_label")
+        url = st.text_input("URL", key="link_url")
+        submitted = st.form_submit_button("➕ Add link")
+        if submitted:
+            if not label or not url:
+                st.warning("Please provide *Label* and *URL*.")
+                return
+            st.session_state.cv_links.append({"label": label, "url": url})
+            st.success("Link added.")
+
+
+def _format_date(d: date, fmt: str) -> str:
+    try:
+        return d.strftime(fmt)
+    except Exception:
+        return str(d)
+
+
+def _docx_header(doc, text: str, size=18, bold=True):
+    p = doc.add_paragraph()
+    run = p.add_run(text)
+    run.bold = bold
+    run.font.size = Pt(size)
+    p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    return p
+
+
+def build_docx(cv: Dict[str, Any]) -> bytes:
+    """Create a .docx CV and return raw bytes."""
+    if Document is None:
+        raise RuntimeError("python-docx not available")
 
     doc = Document()
-    # Title
-    head = doc.add_heading(level=0)
-    run = head.add_run(name or "Your Name")
-    run.font.size = Pt(20)
 
-    if title.strip():
-        p = doc.add_paragraph()
-        r = p.add_run(title.strip())
-        r.bold = True
+    # Header
+    full_name = cv["personal"]["full_name"].strip() or "Your Name"
+    role = cv["personal"]["role"].strip()
+    name_p = _docx_header(doc, full_name, size=22)
+    if role:
+        p_role = doc.add_paragraph()
+        run = p_role.add_run(role)
+        run.italic = True
+        run.font.size = Pt(12)
 
-    # Contact
-    parts = []
-    if contact.get("email"):   parts.append(f"Email: {contact['email']}")
-    if contact.get("phone"):   parts.append(f"Phone: {contact['phone']}")
-    if contact.get("website"): parts.append(f"Website: {contact['website']}")
-    if contact.get("linkedin"):parts.append(f"LinkedIn: {contact['linkedin']}")
-    if contact.get("github"):  parts.append(f"GitHub: {contact['github']}")
-    if parts:
-        doc.add_paragraph(" | ".join(parts))
+    # Contact line
+    labels = cv["labels"]
+    contact_bits = []
+    for k in ("email", "phone", "location", "website", "linkedin", "github"):
+        val = cv["personal"].get(k) or ""
+        if val:
+            label = labels.get(k, k.capitalize())
+            contact_bits.append(f"{label}: {val}")
+    if contact_bits:
+        p = doc.add_paragraph(" | ".join(contact_bits))
+        p.runs[0].font.size = Pt(9)
 
     # Summary
-    if summary.strip():
-        doc.add_heading("Summary", level=1)
-        doc.add_paragraph(summary.strip())
-
-    # Skills
-    if skills:
-        doc.add_heading("Skills", level=1)
-        for s in skills:
-            doc.add_paragraph(s, style="List Bullet")
+    if cv["summary"].strip():
+        _docx_header(doc, "Summary", size=14)
+        doc.add_paragraph(cv["summary"].strip())
 
     # Experience
-    if experience:
-        doc.add_heading("Experience", level=1)
-        for x in experience:
-            doc.add_paragraph(x, style="List Bullet")
+    if cv["experience"]:
+        _docx_header(doc, "Experience", size=14)
+        for item in cv["experience"]:
+            title = item["title"]; company = item["company"]
+            start = _format_date(item["start"], cv["date_fmt"])
+            end = "Present" if item["current"] else _format_date(item["end"], cv["date_fmt"])
+            doc.add_paragraph(f"{title} — {company}  ({start} – {end})")
+            for b in item["bullets"]:
+                doc.add_paragraph(b, style="List Bullet")
 
     # Education
-    if education:
-        doc.add_heading("Education", level=1)
-        for e in education:
-            doc.add_paragraph(e, style="List Bullet")
+    if cv["education"]:
+        _docx_header(doc, "Education", size=14)
+        for ed in cv["education"]:
+            start = _format_date(ed["start"], cv["date_fmt"])
+            end = _format_date(ed["end"], cv["date_fmt"])
+            line = f"{ed['degree']} — {ed['institution']} ({start} – {end})"
+            if ed.get("notes"):
+                line += f" — {ed['notes']}"
+            doc.add_paragraph(line)
+
+    # Skills
+    if cv["skills"]:
+        _docx_header(doc, "Skills", size=14)
+        doc.add_paragraph(", ".join(cv["skills"]))
+
+    # Links
+    if cv["links"]:
+        _docx_header(doc, "Links", size=14)
+        for link in cv["links"]:
+            doc.add_paragraph(f"{link['label']}: {link['url']}")
 
     bio = io.BytesIO()
     doc.save(bio)
     return bio.getvalue()
 
-# ---------------------------------------------------------
-# PDF export (ReportLab)
-# ---------------------------------------------------------
-def build_pdf(name, title, contact, summary, skills, experience, education) -> bytes:
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.enums import TA_LEFT
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, ListFlowable, ListItem
-    from reportlab.lib.units import mm
 
-    buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=18*mm, rightMargin=18*mm, topMargin=18*mm, bottomMargin=18*mm)
-    styles = getSampleStyleSheet()
-    H1 = styles["Heading1"]; H2 = styles["Heading2"]; Body = styles["BodyText"]
-    # Slightly smaller body for CV density
-    Body.fontSize = 10
-    Body.leading = 14
+def build_pdf(cv: Dict[str, Any]) -> bytes:
+    """Simple text PDF (fallback)."""
+    if canvas is None:
+        raise RuntimeError("reportlab not available")
 
-    story = []
+    bio = io.BytesIO()
+    c = canvas.Canvas(bio, pagesize=A4)
+    width, height = A4
+
+    y = height - 50
+    def line(txt: str, sz=10, gap=14, bold=False):
+        nonlocal y
+        c.setFont("Helvetica-Bold" if bold else "Helvetica", sz)
+        c.drawString(40, y, txt)
+        y -= gap
 
     # Header
-    story.append(Paragraph(name or "Your Name", H1))
-    if title.strip():
-        story.append(Paragraph(title.strip(), H2))
+    full_name = cv["personal"]["full_name"].strip() or "Your Name"
+    role = cv["personal"]["role"].strip()
+    line(full_name, sz=16, gap=20, bold=True)
+    if role:
+        line(role, sz=11, gap=16)
 
-    contact_parts = []
-    if contact.get("email"):   contact_parts.append(contact["email"])
-    if contact.get("phone"):   contact_parts.append(contact["phone"])
-    if contact.get("website"): contact_parts.append(contact["website"])
-    if contact.get("linkedin"):contact_parts.append(contact["linkedin"])
-    if contact.get("github"):  contact_parts.append(contact["github"])
-    if contact_parts:
-        story.append(Paragraph(" | ".join(contact_parts), Body))
-    story.append(Spacer(1, 6))
+    # Contact
+    contact_bits = []
+    labels = cv["labels"]
+    for k in ("email", "phone", "location", "website", "linkedin", "github"):
+        val = cv["personal"].get(k) or ""
+        if val:
+            contact_bits.append(f"{labels.get(k, k.capitalize())}: {val}")
+    if contact_bits:
+        line(" | ".join(contact_bits), sz=8, gap=16)
+
+    # Sections
+    if cv["summary"].strip():
+        line("Summary", sz=12, gap=16, bold=True)
+        for para in cv["summary"].splitlines():
+            line(para, sz=10, gap=14)
+
+    if cv["experience"]:
+        line("Experience", sz=12, gap=16, bold=True)
+        for it in cv["experience"]:
+            start = _format_date(it["start"], cv["date_fmt"])
+            end = "Present" if it["current"] else _format_date(it["end"], cv["date_fmt"])
+            line(f"{it['title']} — {it['company']} ({start} – {end})", sz=10, gap=14)
+            for b in it["bullets"]:
+                line(f"• {b}", sz=10, gap=14)
+
+    if cv["education"]:
+        line("Education", sz=12, gap=16, bold=True)
+        for ed in cv["education"]:
+            start = _format_date(ed["start"], cv["date_fmt"])
+            end = _format_date(ed["end"], cv["date_fmt"])
+            t = f"{ed['degree']} — {ed['institution']} ({start} – {end})"
+            if ed.get("notes"):
+                t += f" — {ed['notes']}"
+            line(t, sz=10, gap=14)
+
+    if cv["skills"]:
+        line("Skills", sz=12, gap=16, bold=True)
+        line(", ".join(cv["skills"]), sz=10, gap=16)
+
+    if cv["links"]:
+        line("Links", sz=12, gap=16, bold=True)
+        for link in cv["links"]:
+            line(f"{link['label']}: {link['url']}", sz=10, gap=14)
+
+    c.showPage()
+    c.save()
+    return bio.getvalue()
+
+
+def _build_cv_dict() -> Dict[str, Any]:
+    preset = COUNTRY_PRESETS.get(st.session_state.cv_country, COUNTRY_PRESETS[DEFAULT_COUNTRY])
+    return {
+        "personal": st.session_state.cv_personal,
+        "summary": st.session_state.cv_summary or "",
+        "experience": st.session_state.cv_experience,
+        "education": st.session_state.cv_education,
+        "skills": st.session_state.cv_skills,
+        "links": st.session_state.cv_links,
+        "date_fmt": preset["date_fmt"],
+        "labels": {**{k: k.capitalize() for k in ("phone", "email", "location")}, **preset["labels"]},
+    }
+
+
+# ─────────────────────────────────────────────────────────
+# Streamlit UI
+# ─────────────────────────────────────────────────────────
+def render():
+    st.header("📄 International CV Builder")
+
+    _init_state()
+
+    # Sidebar config
+    st.sidebar.subheader("Settings")
+    st.session_state.cv_country = st.sidebar.selectbox(
+        "Country / Locale", list(COUNTRY_PRESETS.keys()), index=list(COUNTRY_PRESETS.keys()).index(DEFAULT_COUNTRY)
+    )
+    st.session_state.cv_template = st.sidebar.selectbox("Template", ["Clean", "Compact"])
+
+    st.sidebar.caption("Your progress is kept in session only (clears on refresh).")
+
+    # Personal info
+    st.subheader("Personal information")
+    p = st.session_state.cv_personal
+    c1, c2 = st.columns(2)
+    with c1:
+        p["full_name"] = st.text_input("Full name*", value=p["full_name"])
+        p["email"] = st.text_input("Email", value=p["email"])
+        p["website"] = st.text_input("Website / Portfolio", value=p["website"])
+        p["linkedin"] = st.text_input("LinkedIn", value=p["linkedin"])
+    with c2:
+        p["role"] = st.text_input("Target role / Headline", value=p["role"])
+        p["phone"] = st.text_input(COUNTRY_PRESETS[st.session_state.cv_country]["labels"]["phone"], value=p["phone"])
+        p["location"] = st.text_input(COUNTRY_PRESETS[st.session_state.cv_country]["labels"]["location"], value=p["location"])
+        p["github"] = st.text_input("GitHub", value=p["github"])
 
     # Summary
-    if summary.strip():
-        story.append(Paragraph("Summary", H2))
-        story.append(Paragraph(summary.strip().replace("\n", "<br/>"), Body))
-        story.append(Spacer(1, 6))
+    st.subheader("Professional summary")
+    st.session_state.cv_summary = st.text_area(
+        "Brief paragraph about yourself (3-5 lines)",
+        value=st.session_state.cv_summary,
+        height=120,
+        placeholder="Product-minded software engineer with 7+ years..."
+    )
 
-    # Skills
-    if skills:
-        story.append(Paragraph("Skills", H2))
-        story.append(ListFlowable([ListItem(Paragraph(s, Body)) for s in skills], bulletType="bullet"))
-        story.append(Spacer(1, 6))
+    # Experience / Education / Skills / Links
+    st.divider()
+    _add_experience_form()
+    if st.session_state.cv_experience:
+        st.write("**Experience entries**")
+        for i, item in enumerate(st.session_state.cv_experience):
+            with st.expander(f"{item['title']} — {item['company']}"):
+                st.write(f"**Dates:** {_format_date(item['start'], _build_cv_dict()['date_fmt'])} – "
+                         f"{'Present' if item['current'] else _format_date(item['end'], _build_cv_dict()['date_fmt'])}")
+                for b in item["bullets"]:
+                    st.write(f"- {b}")
+                if st.button(f"Remove", key=f"rm_exp_{i}"):
+                    st.session_state.cv_experience.pop(i)
+                    st.experimental_rerun()
 
-    # Experience
-    if experience:
-        story.append(Paragraph("Experience", H2))
-        story.append(ListFlowable([ListItem(Paragraph(x, Body)) for x in experience], bulletType="bullet"))
-        story.append(Spacer(1, 6))
+    st.divider()
+    _add_education_form()
+    if st.session_state.cv_education:
+        st.write("**Education entries**")
+        for i, ed in enumerate(st.session_state.cv_education):
+            with st.expander(f"{ed['degree']} — {ed['institution']}"):
+                st.write(f"{_format_date(ed['start'], _build_cv_dict()['date_fmt'])} – {_format_date(ed['end'], _build_cv_dict()['date_fmt'])}")
+                if ed.get("notes"):
+                    st.write(ed["notes"])
+                if st.button("Remove", key=f"rm_edu_{i}"):
+                    st.session_state.cv_education.pop(i)
+                    st.experimental_rerun()
 
-    # Education
-    if education:
-        story.append(Paragraph("Education", H2))
-        story.append(ListFlowable([ListItem(Paragraph(e, Body)) for e in education], bulletType="bullet"))
-        story.append(Spacer(1, 6))
+    st.divider()
+    _add_skill_form()
+    if st.session_state.cv_skills:
+        st.write("**Skills**")
+        cols = st.columns(6)
+        for i, sk in enumerate(st.session_state.cv_skills):
+            cols[i % 6].markdown(f"- {sk}")
+        if st.button("Clear all skills"):
+            st.session_state.cv_skills.clear()
+            st.success("Skills cleared.")
 
-    doc.build(story)
-    return buf.getvalue()
+    st.divider()
+    _add_link_form()
+    if st.session_state.cv_links:
+        st.write("**Links**")
+        for i, l in enumerate(st.session_state.cv_links):
+            st.write(f"- [{l['label']}]({l['url']})")
+        if st.button("Clear links"):
+            st.session_state.cv_links.clear()
 
-# ---------------------------------------------------------
-# UI
-# ---------------------------------------------------------
-def render():
-    st.header("📄 CV Builder (Real)")
+    # Preview & Export
+    st.divider()
+    st.subheader("Preview & Export")
+    cv = _build_cv_dict()
 
-    with st.form("cv_form", clear_on_submit=False):
-        st.subheader("Profile")
-        c1, c2 = st.columns(2)
-        with c1:
-            name = st.text_input("Full name", "")
-            title = st.text_input("Professional title", "Product Manager")
-        with c2:
-            email = st.text_input("Email", "")
-            phone = st.text_input("Phone", "")
+    c1, c2 = st.columns(2)
+    with c1:
+        if Document:
+            try:
+                docx_bytes = build_docx(cv)
+                st.download_button(
+                    "⬇️ Download DOCX",
+                    data=docx_bytes,
+                    file_name=f"{cv['personal']['full_name'] or 'CV'}.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            except Exception as e:
+                st.error(f"DOCX export error: {e}")
+        else:
+            st.info("DOCX export unavailable (python-docx not installed).")
 
-        c3, c4, c5 = st.columns(3)
-        with c3:
-            website = st.text_input("Website / Portfolio", "")
-        with c4:
-            linkedin = st.text_input("LinkedIn", "")
-        with c5:
-            github = st.text_input("GitHub", "")
+    with c2:
+        if canvas:
+            try:
+                pdf_bytes = build_pdf(cv)
+                st.download_button(
+                    "⬇️ Download PDF (simple)",
+                    data=pdf_bytes,
+                    file_name=f"{cv['personal']['full_name'] or 'CV'}.pdf",
+                    mime="application/pdf",
+                )
+            except Exception as e:
+                st.error(f"PDF export error: {e}")
+        else:
+            st.info("PDF export unavailable (reportlab not installed).")
 
-        st.subheader("Summary")
-        summary = st.text_area(
-            "Short professional summary",
-            placeholder="3–5 lines that capture your strengths, outcomes, and focus."
-        )
-
-        st.subheader("Skills (comma-separated or one per line)")
-        skills_raw = st.text_area(
-            "Skills",
-            placeholder="Python, Streamlit, Product Strategy, Stakeholder Management"
-        )
-
-        st.subheader("Experience (bullets: one per line)")
-        exp_raw = st.text_area(
-            "Experience bullets",
-            placeholder="Led cross-functional team of 8 to ship onboarding flow increasing activation by 18%.\nBuilt data pipeline reducing reporting time by 60%."
-        )
-
-        st.subheader("Education (bullets: one per line)")
-        edu_raw = st.text_area(
-            "Education bullets",
-            placeholder="B.Sc. in Computer Science — University of Cape Town\nProduct Strategy, Reforge (2024)"
-        )
-
-        submitted = st.form_submit_button("Preview")
-
-    if not submitted:
-        st.info("Fill out your details and click **Preview** to generate your CV.")
-        return
-
-    skills = _lines(skills_raw)
-    experience = _lines(exp_raw)
-    education = _lines(edu_raw)
-    contact = {"email": email, "phone": phone, "website": website, "linkedin": linkedin, "github": github}
-
-    # Live preview as Markdown
-    st.subheader("Preview")
-    md = _to_markdown(name, title, contact, summary, skills, experience, education)
-    st.markdown(md)
-
-    # Exports
-    today = datetime.now().strftime("%Y-%m-%d")
-    base = (name or "resume").strip().lower().replace(" ", "_")
-    fn_docx = f"{base}_{today}.docx"
-    fn_pdf  = f"{base}_{today}.pdf"
-
-    # DOCX
-    try:
-        docx_bytes = build_docx(name, title, contact, summary, skills, experience, education)
-        st.download_button("⬇️ Download DOCX", data=docx_bytes, file_name=fn_docx, mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", use_container_width=True)
-    except Exception as e:
-        st.warning(f"Could not generate DOCX (python-docx missing?): {e}")
-
-    # PDF
-    try:
-        pdf_bytes = build_pdf(name, title, contact, summary, skills, experience, education)
-        st.download_button("⬇️ Download PDF", data=pdf_bytes, file_name=fn_pdf, mime="application/pdf", use_container_width=True)
-    except Exception as e:
-        st.warning(f"Could not generate PDF (reportlab missing?): {e}")
-
-# Allow local run: streamlit run streamlit_app/tools/cv_builder.py
-if __name__ == "__main__":
-    render()
+    st.caption("Tip: Use concise bullets (impact + numbers), tailor to job, keep to 1–2 pages.")
