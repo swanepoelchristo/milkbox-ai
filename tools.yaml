@@ -1,3 +1,6 @@
+# Milkbox AI Toolbox - dynamic tools menu
+# Each entry maps a sidebar item to a Python module that exposes render()
+
 tools:
   - key: hello
     label: "Hello & About"
@@ -11,9 +14,17 @@ tools:
     label: "Notes"
     module: "tools.notes"
 
+  - key: builder
+    label: "Tool Builder"
+    module: "tools.builder"
+
   - key: invoice_gen
     label: "Invoice Generator"
     module: "tools.invoice_gen"
+
+  - key: cv_builder
+    label: "CV Builder"
+    module: "tools.cv_builder"
 
   - key: demo_2
     label: "Demo Tool 2"
