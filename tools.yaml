@@ -10,3 +10,4 @@ tools:
   - key: notes
     label: "Notes"
     module: "tools.notes"
+    
