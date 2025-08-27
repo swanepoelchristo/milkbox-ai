@@ -1,12 +1,12 @@
 tools:
   - key: hello
     label: "Hello & About"
-    module: "streamlit_app.tools.hello"
+    module: "tools.hello"
 
   - key: resume
     label: "Resume Builder"
-    module: "streamlit_app.tools.resume"
+    module: "tools.resume"
 
   - key: notes
     label: "Notes"
-    module: "streamlit_app.tools.notes"
+    module: "tools.notes"
