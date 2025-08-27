@@ -9,6 +9,8 @@ import yaml
 
 # ─────────────────────────────────────────────────────────
 # Secrets / Config (set in Streamlit Cloud → App → Settings → Secrets)
+# Required: GITHUB_TOKEN, GITHUB_REPO
+# Optional: GITHUB_BRANCH (defaults to "main")
 # ─────────────────────────────────────────────────────────
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 GITHUB_REPO = os.getenv("GITHUB_REPO", "")          # e.g. "swanepoelchristo/milkbox-ai"
@@ -49,9 +51,9 @@ def gh_content_get(path: str, ref: str = None):
 
 def gh_content_put_update(path: str, message: str, content_str: str, branch: str):
     """
-    Create or update a file in GitHub. If it exists, include SHA for update.
+    Create or update a file in GitHub. If the file exists, include its SHA for update.
+    This prevents 422: 'sha wasn't supplied' on updates.
     """
-    # Check if file exists
     sha = None
     existing = gh_content_get(path, ref=branch)
     if existing.status_code == 200:
@@ -83,16 +85,23 @@ def load_yaml_from_repo(path: str, branch: str):
             return None, None, f"YAML parse error in {path}: {e}"
         return y, sha, None
     elif r.status_code == 404:
-        # Not found — we’ll create a new file
+        # Not found — start from empty
         return {}, None, None
     else:
         return None, None, f"Could not read {path}: {r.status_code} {r.text}"
 
 
 def ensure_tools_entry(ydata: dict, key: str, label: str):
+    """
+    Ensure tools.yaml contains (or updates) an entry for this tool.
+    Structure:
+      tools:
+        - key: <key>
+          label: <label>
+          module: tools.<key>
+    """
     ydata = ydata or {}
     tools = ydata.get("tools", [])
-    # if exists, replace module/label; else append
     found = False
     for t in tools:
         if isinstance(t, dict) and t.get("key") == key:
@@ -123,6 +132,9 @@ def render():
 '''
 
 
+# ─────────────────────────────────────────────────────────
+# UI
+# ─────────────────────────────────────────────────────────
 def render():
     st.header("🛠️ Tool Builder")
 
@@ -147,7 +159,7 @@ def render():
 
     ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
 
-    # 1) Write or update tool_specs/<key>.json (optional spec record)
+    # 1) Write/update tool_specs/<key>.json (keeps a record of the brief)
     spec_path = f"tool_specs/{key}.json"
     spec_obj = {
         "key": key,
@@ -167,7 +179,7 @@ def render():
     else:
         st.success(f"Wrote/updated {spec_path}")
 
-    # 2) Write or update streamlit_app/tools/<key>.py
+    # 2) Write/update streamlit_app/tools/<key>.py (create scaffold or update existing)
     tool_code = generate_tool_py(key, label, short_desc)
     tool_py_path = f"streamlit_app/tools/{key}.py"
     r_tool = gh_content_put_update(
@@ -181,7 +193,7 @@ def render():
         return
     st.success(f"Created/updated {tool_py_path}")
 
-    # 3) Read tools.yaml (create if missing), ensure entry, and write/update
+    # 3) Read tools.yaml (create if missing), ensure entry, write/update
     ydata, _, err = load_yaml_from_repo("tools.yaml", GITHUB_BRANCH)
     if err:
         st.error(err)
