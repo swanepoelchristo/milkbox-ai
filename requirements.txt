@@ -1,2 +1,2 @@
-streamlit>=1.29
-PyYAML>=6.0
+streamlit
+pyyaml
