@@ -1,0 +1,7 @@
+{
+  "key": "bar_tools",
+  "label": "Bar Tools (ABV & Tips)",
+  "description": "Two quick helpers for bars: 1) ABV calculator (volume \u00d7 ABV% \u2192 pure alcohol ml/g) and 2) Tip & bill split calculator. Keep it lightweight, fast, and mobile-friendly.\n",
+  "created_at": "2025-08-27 16:30:49 UTC",
+  "source": "Tool Builder"
+}
