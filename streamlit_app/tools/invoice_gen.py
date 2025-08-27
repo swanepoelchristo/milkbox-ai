@@ -1,152 +1,233 @@
-import streamlit as st
-import csv
 import io
-from datetime import datetime
+from datetime import date
+from decimal import Decimal, InvalidOperation
 
-# -------------------------------------------------------------------
-# Helpers
-# -------------------------------------------------------------------
-CURRENCIES = {
-    "USD ($)": "$",
-    "ZAR (R)": "R",
-    "EUR (€)": "€",
-    "GBP (£)": "£",
-}
+import streamlit as st
 
-def parse_items(text: str):
+# ========== Helpers ==========
+def parse_items(raw: str):
     """
-    Parse text lines in the format:
-      description | qty | price
-    Returns (rows, errors, total)
-    rows: list[dict] with keys: description, qty, price, line_total
-    errors: list[str] warnings about skipped lines
-    total: float grand total
+    Each line: description | qty | price
+    qty and price can be int/float
+    Returns list of dicts: [{"desc":..., "qty": Decimal, "price": Decimal, "total": Decimal}, ...]
     """
-    rows = []
-    errors = []
-    total = 0.0
+    items = []
+    raw = (raw or "").strip()
+    if not raw:
+        return items
 
-    for i, raw in enumerate(text.splitlines(), start=1):
-        line = raw.strip()
-        if not line:
+    for ln_no, line in enumerate(raw.splitlines(), start=1):
+        if not line.strip():
             continue
-
         parts = [p.strip() for p in line.split("|")]
         if len(parts) != 3:
-            errors.append(f"Line {i}: expected 3 fields (desc | qty | price), got {len(parts)} → '{raw}'")
-            continue
-
+            raise ValueError(f"Line {ln_no}: expected 3 fields separated by | (desc | qty | price). Got: {line!r}")
         desc, qty_s, price_s = parts
         try:
-            # Allow both int/float qty; price as float
-            qty = float(qty_s)
-            price = float(price_s)
-        except ValueError:
-            errors.append(f"Line {i}: qty and price must be numeric → '{raw}'")
-            continue
+            qty = Decimal(qty_s)
+        except InvalidOperation:
+            raise ValueError(f"Line {ln_no}: qty is not a number: {qty_s!r}")
+        try:
+            price = Decimal(price_s)
+        except InvalidOperation:
+            raise ValueError(f"Line {ln_no}: price is not a number: {price_s!r}")
 
-        line_total = qty * price
-        rows.append({
-            "Description": desc,
-            "Qty": qty,
-            "Unit price": price,
-            "Line total": line_total,
-        })
-        total += line_total
-
-    return rows, errors, total
+        total = (qty * price).quantize(Decimal("0.01"))
+        items.append({"desc": desc, "qty": qty, "price": price, "total": total})
+    return items
 
 
-def csv_bytes(rows):
-    """Return CSV bytes (utf-8) for rows (list of dicts)."""
-    buf = io.StringIO()
-    if rows:
-        writer = csv.DictWriter(buf, fieldnames=list(rows[0].keys()))
-        writer.writeheader()
-        for r in rows:
-            writer.writerow(r)
-    return buf.getvalue().encode("utf-8")
+def money(amount: Decimal, currency: str):
+    q = amount.quantize(Decimal("0.01"))
+    symbol = {"USD": "$", "EUR": "€", "GBP": "£", "ZAR": "R"}.get(currency, "")
+    if symbol:
+        return f"{symbol}{q}"
+    return f"{q} {currency}"
 
 
-# -------------------------------------------------------------------
-# UI
-# -------------------------------------------------------------------
+# ========== PDF Renderer (ReportLab) ==========
+def build_pdf(invoice_no: str,
+              issue_date: date,
+              my_company: dict,
+              client: dict,
+              items: list[dict],
+              tax_percent: Decimal,
+              currency: str) -> bytes:
+    """
+    Create a simple professional PDF invoice and return bytes.
+    """
+    # Lazy import so Streamlit runs even before reportlab is installed
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=18*mm, rightMargin=18*mm, topMargin=18*mm, bottomMargin=18*mm)
+    styles = getSampleStyleSheet()
+    story = []
+
+    # Header
+    story.append(Paragraph(f"<b>INVOICE #{invoice_no}</b>", styles["Title"]))
+    story.append(Paragraph(f"Issue date: {issue_date.isoformat()}", styles["Normal"]))
+    story.append(Spacer(1, 8))
+
+    # Parties
+    party_tbl = Table([
+        ["From:", my_company.get("name", ""), "", "Bill To:", client.get("name", "")],
+        ["Email:", my_company.get("email", ""), "", "Email:", client.get("email", "")],
+        ["Address:", my_company.get("addr", ""), "", "Address:", client.get("addr", "")],
+    ], colWidths=[20*mm, 60*mm, 10*mm, 20*mm, 60*mm])
+    party_tbl.setStyle(TableStyle([
+        ("FONT", (0, 0), (-1, -1), "Helvetica", 9),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    story.append(party_tbl)
+    story.append(Spacer(1, 10))
+
+    # Items table
+    data = [["Description", "Qty", "Unit Price", "Line Total"]]
+    subtotal = Decimal("0.00")
+    for it in items:
+        data.append([
+            it["desc"],
+            f"{it['qty']}",
+            money(it["price"], currency),
+            money(it["total"], currency),
+        ])
+        subtotal += it["total"]
+
+    tbl = Table(data, colWidths=[90*mm, 20*mm, 30*mm, 30*mm])
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.lightgrey),
+        ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 9),
+        ("FONT", (0, 1), (-1, -1), "Helvetica", 9),
+        ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    ]))
+    story.append(tbl)
+    story.append(Spacer(1, 8))
+
+    # Totals
+    tax_amount = (subtotal * (tax_percent / Decimal("100"))).quantize(Decimal("0.01"))
+    total = (subtotal + tax_amount).quantize(Decimal("0.01"))
+    totals = Table([
+        ["Subtotal:", money(subtotal, currency)],
+        [f"Tax ({tax_percent}%):", money(tax_amount, currency)],
+        ["Total:", money(total, currency)],
+    ], colWidths=[40*mm, 30*mm], hAlign="RIGHT")
+    totals.setStyle(TableStyle([
+        ("FONT", (0, 0), (-1, -1), "Helvetica", 10),
+        ("FONT", (0, 2), (-1, 2), "Helvetica-Bold", 11),
+        ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
+        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+    ]))
+    story.append(totals)
+    story.append(Spacer(1, 12))
+
+    # Footer note
+    story.append(Paragraph("Thank you for your business.", styles["Italic"]))
+
+    doc.build(story)
+    return buf.getvalue()
+
+
+# ========== Streamlit UI ==========
 def render():
-    st.header("📄 Invoice Generator")
+    st.header("🧾 Invoice Generator")
+    st.write("Enter client details and line items. Preview totals, then download a PDF invoice.")
 
-    # --- Left column: inputs
-    with st.form("invoice_form", clear_on_submit=False):
-        client_name = st.text_input("Client name", "")
-        client_email = st.text_input("Client email", "")
+    with st.form("inv_form", clear_on_submit=False):
+        cols = st.columns(2)
+        with cols[0]:
+            client_name = st.text_input("Client name")
+            client_email = st.text_input("Client email")
+            client_addr = st.text_area("Client address", height=80)
+        with cols[1]:
+            my_name = st.text_input("Your/Company name")
+            my_email = st.text_input("Your email")
+            my_addr = st.text_area("Your address", height=80)
 
-        st.caption("Items (one per line, format: description | qty | price)")
-        default_items = "Design work | 10 | 50\nHosting | 1 | 12.99"
-        items_text = st.text_area(
-            "Items",
-            value=default_items,
-            height=150,
-            help="Each line: description | qty | price. Example: 'Design | 2 | 99.99'"
-        )
+        currency = st.selectbox("Currency", ["USD", "EUR", "GBP", "ZAR"], index=0)
+        tax_percent_str = st.text_input("Tax %", "0")
+        items_hint = "Design work | 10 | 50\nHosting | 1 | 12.99"
+        items_raw = st.text_area("Items (one per line, format: description | qty | price)", value=items_hint, height=120)
 
-        currency_label = st.selectbox(
-            "Currency",
-            options=list(CURRENCIES.keys()),
-            index=0
-        )
-        submit = st.form_submit_button("Preview")
+        submitted = st.form_submit_button("Preview")
 
-    # --- Right / below: preview
-    if submit:
-        rows, errors, total = parse_items(items_text)
-        symbol = CURRENCIES[currency_label]
+    if not submitted:
+        return
 
-        # Client summary
-        st.subheader("Client")
-        if client_name or client_email:
-            st.write(
-                f"**Name:** {client_name or '—'}  \n"
-                f"**Email:** {client_email or '—'}"
-            )
-        else:
-            st.write("_No client details entered._")
+    # Validation + parse
+    try:
+        items = parse_items(items_raw)
+        if not items:
+            st.warning("Please add at least one line item.")
+            return
+    except ValueError as e:
+        st.error(str(e))
+        return
 
-        # Warnings
-        if errors:
-            with st.expander("⚠️ Skipped lines / warnings", expanded=False):
-                for msg in errors:
-                    st.warning(msg)
+    try:
+        tax_percent = Decimal(tax_percent_str)
+        if tax_percent < 0 or tax_percent > 100:
+            raise InvalidOperation
+    except InvalidOperation:
+        st.error("Tax % must be a number between 0 and 100.")
+        return
 
-        # Items table
-        st.subheader("Items")
-        if rows:
-            # Render currency formatting in a copy for display
-            display_rows = []
-            for r in rows:
-                display_rows.append({
-                    "Description": r["Description"],
-                    "Qty": r["Qty"],
-                    "Unit price": f"{symbol}{r['Unit price']:.2f}",
-                    "Line total": f"{symbol}{r['Line total']:.2f}",
-                })
-            st.dataframe(display_rows, use_container_width=True, hide_index=True)
+    # Compute preview
+    subtotal = sum((it["total"] for it in items), Decimal("0.00"))
+    tax_amount = (subtotal * (tax_percent / Decimal("100"))).quantize(Decimal("0.01"))
+    total = (subtotal + tax_amount).quantize(Decimal("0.01"))
 
-            # Total
-            st.metric("Total", f"{symbol}{total:.2f}")
+    st.subheader("Preview")
+    st.write(f"**Client:** {client_name or '—'}  |  **Email:** {client_email or '—'}")
+    st.write(f"**Currency:** {currency}  |  **Tax:** {tax_percent}%")
 
-            # Download CSV
-            csv_data = csv_bytes(rows)
-            today = datetime.now().strftime("%Y-%m-%d")
-            default_file = f"invoice_{today}.csv"
-            st.download_button(
-                "⬇️ Download CSV",
-                data=csv_data,
-                file_name=default_file,
-                mime="text/csv",
-            )
-        else:
-            st.info("No valid line items to display yet. Add lines and click **Preview**.")
+    # Items preview table
+    prev_cols = st.columns([6, 2, 2, 2])
+    prev_cols[0].markdown("**Description**")
+    prev_cols[1].markdown("**Qty**")
+    prev_cols[2].markdown("**Unit**")
+    prev_cols[3].markdown("**Line Total**")
+    for it in items:
+        row = st.columns([6, 2, 2, 2])
+        row[0].write(it["desc"])
+        row[1].write(f"{it['qty']}")
+        row[2].write(money(it["price"], currency))
+        row[3].write(money(it["total"], currency))
 
+    st.markdown("---")
+    tcols = st.columns([6, 2, 2, 2])
+    tcols[2].write("**Subtotal**")
+    tcols[3].write(money(subtotal, currency))
+    tcols = st.columns([6, 2, 2, 2])
+    tcols[2].write(f"**Tax ({tax_percent}%)**")
+    tcols[3].write(money(tax_amount, currency))
+    tcols = st.columns([6, 2, 2, 2])
+    tcols[2].write("**Total**")
+    tcols[3].write(money(total, currency))
 
-# Allow running locally:  streamlit run streamlit_app/tools/invoice_gen.py
-if __name__ == "__main__":
-    render()
+    # Build the PDF
+    invoice_no = f"{date.today().strftime('%Y%m%d')}-{client_name.strip()[:10] or 'client'}"
+    pdf_bytes = build_pdf(
+        invoice_no=invoice_no,
+        issue_date=date.today(),
+        my_company={"name": my_name, "email": my_email, "addr": my_addr},
+        client={"name": client_name, "email": client_email, "addr": client_addr},
+        items=items,
+        tax_percent=tax_percent,
+        currency=currency,
+    )
+
+    st.download_button(
+        "⬇️ Download PDF",
+        data=pdf_bytes,
+        file_name=f"invoice-{invoice_no}.pdf",
+        mime="application/pdf",
+    )
