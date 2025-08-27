@@ -3,3 +3,4 @@ pyyaml
 requests
 reportlab
 python-docx
+PyPDF2
