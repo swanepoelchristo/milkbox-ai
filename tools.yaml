@@ -1,13 +1,3 @@
-tools:
-  - key: hello
-    label: "Hello & About"
-    module: "tools.hello"
-
-  - key: resume
-    label: "Resume Builder"
-    module: "tools.resume"
-
-  - key: notes
-    label: "Notes"
-    module: "tools.notes"
-    
+- key: builder
+  label: "Tool Builder"
+  module: "tools.builder"
