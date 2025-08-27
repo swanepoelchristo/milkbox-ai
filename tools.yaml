@@ -1,39 +1,51 @@
-# Milkbox AI – tool registry
-# Each entry:
-#   key:     unique id (also used for file name under streamlit_app/tools/<key>.py)
-#   label:   what shows in the sidebar
-#   module:  Python module to import (relative to streamlit_app/)
-#   tier:    free | paid  (used by the PIN gate in app.py)
-#   desc:    short help text shown in the UI (optional)
-
 tools:
-  - key: builder
-    label: "Tool Builder"
-    module: "tools.builder"
+  - key: hello
+    label: Hello & About
+    module: tools.hello
     tier: free
-    desc: "Create or update tools from a brief; auto-commits Python files and registers them here."
+    desc: Greeting demo and about panel.
+
+  - key: notes
+    label: Notes
+    module: tools.notes
+    tier: free
+    desc: Simple scratchpad stored in session.
 
   - key: invoice_gen
-    label: "Invoice Generator"
-    module: "tools.invoice_gen"
+    label: Invoice Generator
+    module: tools.invoice_gen
     tier: free
-    desc: "Build itemized invoices with tax and totals; download as PDF."
-
-  - key: cv_builder
-    label: "CV Builder"
-    module: "tools.cv_builder"
-    tier: free
-    desc: "International CV builder with import-from-file and DOCX/PDF exports."
+    desc: Create a simple invoice from line items and export.
 
   - key: bar_tools
-    label: "Bar Tools (ABV & Tips)"
-    module: "tools.bar_tools"
+    label: Bar Tools (ABV & Tips)
+    module: tools.bar_tools
     tier: free
-    desc: "Quick ABV/pure alcohol calculator and tip/bill splitter."
+    desc: ABV calculator and tip/bill splitter.
 
-  # --- Paid example (can point to a separate file later) ---
+  - key: cv_builder
+    label: CV Builder
+    module: tools.cv_builder
+    tier: free
+    desc: International CV builder with import/export.
+
+  - key: demo_2
+    label: Demo Tool 2
+    module: tools.demo_2
+    tier: free
+    desc: Sandbox demo made by the Tool Builder.
+
+  # Optional legacy (keep only if you still use it)
+  - key: resume
+    label: Resume Builder (legacy)
+    module: tools.resume
+    tier: free
+    desc: Early resume prototype.
+
+  # Optional — only include if you actually have tools/cv_builder_pro.py ready.
   - key: cv_builder_pro
-    label: "International CV Builder (Pro)"
-    module: "tools.cv_builder"   # reuse for now; swap to tools.cv_builder_pro when ready
-    tier: paid
-    desc: "Pro templates, locale rules, advanced formatting, and premium exports."
+    label: International CV Builder (Pro)
+    module: tools.cv_builder_pro
+    tier: pro
+    desc: Templates, locale rules, advanced formatting, premium exports.
+
