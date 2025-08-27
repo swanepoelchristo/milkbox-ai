@@ -1,245 +1,189 @@
-import os
-import json
-import base64
-from datetime import datetime
-import requests
-import streamlit as st
-import yaml
-from textwrap import dedent
-
-# ─────────────────────────────────────────────────────────
-# Secrets / Config
-# ─────────────────────────────────────────────────────────
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
-GITHUB_REPO = os.getenv("GITHUB_REPO", "")             # e.g. "swanepoelchristo/milkbox-ai"
-GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
-
-API_ROOT = "https://api.github.com"
-HDRS = {
-    "Authorization": f"token {GITHUB_TOKEN}",
-    "Accept": "application/vnd.github+json",
-    "X-GitHub-Api-Version": "2022-11-28",
-}
-
-# ─────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────
-def b64(s: str) -> str:
-    return base64.b64encode(s.encode("utf-8")).decode("utf-8")
-
-def slugify(s: str) -> str:
-    s = s.strip().lower().replace(" ", "_").replace("-", "_")
-    return "".join(ch for ch in s if (ch.isalnum() or ch == "_")).strip("_")
-
-def gh_get(path: str, params=None):
-    return requests.get(f"{API_ROOT}{path}", headers=HDRS, params=params or {})
-
-def gh_post(path: str, payload: dict):
-    return requests.post(f"{API_ROOT}{path}", headers=HDRS, json=payload)
-
-def gh_put(path: str, payload: dict):
-    return requests.put(f"{API_ROOT}{path}", headers=HDRS, json=payload)
-
-def gh_content_get(path: str, ref: str = None):
-    params = {"ref": ref} if ref else None
-    return gh_get(f"/repos/{GITHUB_REPO}/contents/{path}", params=params)
-
-def gh_content_put(path: str, message: str, content_b64: str, branch: str, sha: str | None = None):
-    payload = {"message": message, "content": content_b64, "branch": branch}
-    if sha:
-        payload["sha"] = sha
-    return gh_put(f"/repos/{GITHUB_REPO}/contents/{path}", payload)
-
-def open_issue(title: str, body: str):
-    return gh_post(f"/repos/{GITHUB_REPO}/issues", {"title": title, "body": body})
-
-def open_pr(title: str, head_branch: str, base_branch: str = GITHUB_BRANCH, body: str = ""):
-    return gh_post(f"/repos/{GITHUB_REPO}/pulls", {
-        "title": title,
-        "head": head_branch,
-        "base": base_branch,
-        "body": body
-    })
-
-def fetch_yaml_from_main(path="tools.yaml"):
-    r = gh_content_get(path, ref=GITHUB_BRANCH)
-    if r.status_code != 200:
-        return None, None, f"Could not read {path}: {r.status_code}"
-    data = r.json()
-    content = base64.b64decode(data["content"]).decode("utf-8")
-    sha = data["sha"]
-    try:
-        y = yaml.safe_load(content) or {}
-    except Exception as e:
-        return None, None, f"YAML parse error: {e}"
-    return y, sha, None
-
-def ensure_tools_entry(ydata: dict, key: str, label: str):
-    ydata = ydata or {}
-    tools = ydata.get("tools", [])
-    if not any(isinstance(t, dict) and t.get("key") == key for t in tools):
-        tools.append({"key": key, "label": label, "module": f"tools.{key}"})
-    ydata["tools"] = tools
-    return ydata
-
 def generate_tool_py(key: str, label: str, description: str) -> str:
-    # Avoid f-string here to dodge nested quote issues
-    desc = (description or "New tool created by the Tool Builder.").replace('"', '\\"')
-    code = dedent(
-        """
-        import streamlit as st
+    """
+    Return a complete Streamlit tool module (as code text) for the requested tool.
+    - If the key/label/description suggests a known preset (invoice, cv/resume, notes, bar/menu),
+      we return a richer scaffold for that preset.
+    - Otherwise we return a simple, generic working stub.
+    """
+    norm = f"{key} {label} {description}".lower()
 
-        def render():
-            st.header("🧩 {label}")
-            st.write("{desc}")
+    def is_any(substrings: list[str]) -> bool:
+        return any(s in norm for s in substrings)
 
-            with st.form("{key}_form", clear_on_submit=False):
-                example = st.text_input("Example input", value="")
-                submitted = st.form_submit_button("Run")
+    # ──────────────────────────────────────────────────────────────────
+    # 1) Invoice Generator (rich preset)
+    #    Keywords: invoice
+    # ──────────────────────────────────────────────────────────────────
+    if is_any(["invoice"]):
+        return f'''import streamlit as st
+from datetime import date
 
-            if submitted:
-                st.success(f"✅ {label} ran! You typed: {{example}}")
-        """
-    ).strip()
-    return code.format(label=label, desc=desc, key=key)
-
-def format_issue_body(spec_path: str, brief: dict) -> str:
-    nice = json.dumps(brief, indent=2)
-    body = dedent(
-        """
-        ### Tool Spec
-
-        Spec file: `{spec_path}`
-
-        ```json
-        {nice}
-        ```
-        """
-    ).strip()
-    return body.format(spec_path=spec_path, nice=nice)
-
-def format_pr_body(key: str, label: str, spec_path: str) -> str:
-    body = dedent(
-        """
-        This PR introduces the **{label}** tool.
-
-        - Tool key: `{key}`
-        - Spec: `{spec_path}`
-        - Auto-generated by the in-app Tool Builder.
-
-        Please review the generated scaffold and extend the implementation.
-        """
-    ).strip()
-    return body.format(key=key, label=label, spec_path=spec_path)
-
-# ─────────────────────────────────────────────────────────
-# UI
-# ─────────────────────────────────────────────────────────
 def render():
-    st.header("🛠️ Tool Builder")
-    st.caption("This tool takes a name + description and creates a scaffold tool in GitHub, then registers it in tools.yaml.")
+    st.header("🧾 {label}")
+    st.caption("This is a starter scaffold created by the Tool Builder. Customize freely!")
 
-    # Inputs
-    with st.form("tool_builder_form", clear_on_submit=False):
-        key_raw = st.text_input("Tool key (e.g. invoice_gen)")
-        label = st.text_input("Tool label (e.g. Invoice Generator)")
-        desc = st.text_area("Short description (what this tool should do)")
+    # ── Inputs
+    st.subheader("Client")
+    col1, col2 = st.columns(2)
+    with col1:
+        client_name = st.text_input("Client name", value="Acme Corp")
+        client_email = st.text_input("Client email", value="billing@acme.com")
+    with col2:
+        invoice_no = st.text_input("Invoice #", value="INV-0001")
+        invoice_date = st.date_input("Invoice date", value=date.today())
 
-        # Optional: later you can add 13-question spec; for now keep minimal
-        submitted = st.form_submit_button("Generate tool")
+    st.subheader("Your Business")
+    your_name = st.text_input("Your name / business", value="Milkbox AI")
+    your_email = st.text_input("Your email", value="invoices@milkbox.ai")
 
-    if not submitted:
-        return
+    st.subheader("Line items")
+    items = st.session_state.setdefault("invoice_items", [
+        {{"description": "Discovery workshop", "qty": 1, "unit_price": 1200.0}},
+        {{"description": "Prototype", "qty": 1, "unit_price": 2400.0}},
+    ])
 
-    # Basic validation
-    key = slugify(key_raw)
-    if not key:
-        st.error("Please provide a valid tool key.")
-        return
-    if not label:
-        st.error("Please provide a tool label.")
-        return
+    # Editable table-like UI
+    for i, it in enumerate(items):
+        c1, c2, c3, c4 = st.columns([4, 1, 2, 1])
+        it["description"] = c1.text_input(f"Description #{i+1}", value=it["description"], key=f"desc_{i}")
+        it["qty"] = c2.number_input(f"Qty #{i+1}", min_value=0, value=int(it["qty"]), key=f"qty_{i}")
+        it["unit_price"] = c3.number_input(f"Unit price #{i+1}", min_value=0.0, value=float(it["unit_price"]), step=0.01, key=f"price_{i}")
+        if c4.button("✖", key=f"del_{i}"):
+            items.pop(i)
+            st.experimental_rerun()
 
-    # Check secrets present
-    if not GITHUB_TOKEN or not GITHUB_REPO:
-        st.error("Missing GitHub secrets. Set GITHUB_TOKEN (with repo scope) and GITHUB_REPO in Streamlit Cloud → Settings → Secrets.")
-        return
+    if st.button("➕ Add line"):
+        items.append({{"description": "", "qty": 1, "unit_price": 0.0}})
+        st.experimental_rerun()
 
-    # Build file paths
-    tool_py_path = f"streamlit_app/tools/{key}.py"
-    spec_path = f"tool_specs/{key}.json"
-    tools_yaml_path = "tools.yaml"
+    subtotal = sum(float(it["qty"]) * float(it["unit_price"]) for it in items)
+    tax_rate = st.number_input("Tax %", value=0.0, step=0.5)
+    tax_amount = subtotal * (tax_rate / 100.0)
+    total = subtotal + tax_amount
 
-    # 1) Create/Update tool_specs/<key>.json
-    spec_obj = {
-        "key": key,
-        "label": label,
-        "description": desc,
-        "created_at": datetime.utcnow().isoformat() + "Z",
-        "status": "draft"
-    }
-    spec_json = json.dumps(spec_obj, indent=2)
-    r = gh_content_get(spec_path, ref=GITHUB_BRANCH)
-    spec_sha = r.json()["sha"] if r.status_code == 200 else None
-    rsp = gh_content_put(
-        spec_path,
-        message=f"feat(tool-spec): add {key}.json",
-        content_b64=b64(spec_json),
-        branch=GITHUB_BRANCH,
-        sha=spec_sha
-    )
-    if rsp.status_code not in (200, 201):
-        st.error(f"GitHub error writing spec: {rsp.status_code} {rsp.text}")
-        return
-    st.success(f"📄 Wrote {spec_path}")
+    st.subheader("Totals")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Subtotal", f"${{subtotal:,.2f}}")
+    c2.metric("Tax", f"${{tax_amount:,.2f}}")
+    c3.metric("Total", f"${{total:,.2f}}")
 
-    # 2) Create streamlit_app/tools/<key>.py
-    tool_py = generate_tool_py(key, label, desc)
-    r = gh_content_get(tool_py_path, ref=GITHUB_BRANCH)
-    tool_sha = r.json()["sha"] if r.status_code == 200 else None
-    rsp = gh_content_put(
-        tool_py_path,
-        message=f"feat(tool): scaffold {key}.py",
-        content_b64=b64(tool_py),
-        branch=GITHUB_BRANCH,
-        sha=tool_sha
-    )
-    if rsp.status_code not in (200, 201):
-        st.error(f"GitHub error writing tool code: {rsp.status_code} {rsp.text}")
-        return
-    st.success(f"🧩 Created {tool_py_path}")
+    st.divider()
+    st.write("💡 **Next**: export to PDF/DOCX, brand it, and email it. (Add libs like `reportlab` or `python-docx`.)")
 
-    # 3) Update tools.yaml (add entry if missing)
-    ydata, ysha, yerr = fetch_yaml_from_main(tools_yaml_path)
-    if yerr:
-        st.error(yerr)
-        return
-    ydata = ensure_tools_entry(ydata, key, label)
-    updated_yaml = yaml.safe_dump(ydata, sort_keys=False)
-    rsp = gh_content_put(
-        tools_yaml_path,
-        message=f"chore(tools): register {key} in tools.yaml",
-        content_b64=b64(updated_yaml),
-        branch=GITHUB_BRANCH,
-        sha=ysha
-    )
-    if rsp.status_code not in (200, 201):
-        st.error(f"GitHub error updating tools.yaml: {rsp.status_code} {rsp.text}")
-        return
-    st.success("🗂️ Registered the tool in tools.yaml. It should appear in the sidebar now.")
+    if st.button("Simulate export"):
+        st.success("Invoice export placeholder – wire up PDF/DOCX next!")
+'''
 
-    # 4) Open an Issue (reference the spec)
-    issue_title = f"[Tool Spec] {label} ({key})"
-    issue_body = format_issue_body(spec_path, spec_obj)
-    ir = open_issue(issue_title, issue_body)
-    if ir.status_code in (200, 201):
-        st.info("📌 Opened an Issue for this tool’s spec.")
-    else:
-        st.warning(f"Could not open Issue: {ir.status_code} {ir.text}")
+    # ──────────────────────────────────────────────────────────────────
+    # 2) CV / Resume Builder (preset)
+    #    Keywords: cv, resume
+    # ──────────────────────────────────────────────────────────────────
+    if is_any(["cv", "resume"]):
+        return f'''import streamlit as st
 
-    # 5) (Optional) Open a PR from the same branch if you prefer a PR workflow
-    # Skipped here because we are writing directly to main. You can switch to branch+PR later.
+def render():
+    st.header("📄 {label}")
+    st.caption("Starter CV/Resume builder scaffold.")
 
-# Expose to the app loader
-def main():
-    render()
+    name = st.text_input("Full name", value="Jane Doe")
+    email = st.text_input("Email", value="jane@example.com")
+    role = st.text_input("Desired role", value="Product Manager")
+    summary = st.text_area("Professional summary", height=120)
+
+    st.subheader("Experience")
+    exp = st.session_state.setdefault("cv_exp", [
+        {{"title": "PM", "company": "Milkbox", "years": "2023–2025", "achievements": "- Led X\\n- Shipped Y"}}
+    ])
+
+    for i, e in enumerate(exp):
+        with st.expander(f"Experience #{i+1}: " + (e.get("company") or "")):
+            e["title"] = st.text_input("Title", value=e["title"], key=f"xt{i}")
+            e["company"] = st.text_input("Company", value=e["company"], key=f"xc{i}")
+            e["years"] = st.text_input("Years", value=e["years"], key=f"xy{i}")
+            e["achievements"] = st.text_area("Achievements (bullets)", value=e["achievements"], key=f"xa{i}")
+            if st.button("Remove", key=f"rm{i}"):
+                exp.pop(i); st.experimental_rerun()
+
+    if st.button("➕ Add experience"):
+        exp.append({{"title": "", "company": "", "years": "", "achievements": ""}})
+        st.experimental_rerun()
+
+    st.divider()
+    if st.button("Generate preview"):
+        st.success("Preview ready (placeholder). Add export to DOCX/PDF next.")
+'''
+
+    # ──────────────────────────────────────────────────────────────────
+    # 3) Notes (preset)
+    #    Keywords: notes, note
+    # ──────────────────────────────────────────────────────────────────
+    if is_any(["notes", "note"]):
+        return f'''import streamlit as st
+
+def render():
+    st.header("🗒️ {label}")
+    st.caption("Simple notes workspace (session only). Extend to persist in GitHub/DB.")
+
+    text = st.text_area("Write notes", height=220)
+    if st.button("Save note"):
+        st.session_state.setdefault("notes_list", []).append(text)
+        st.success("Saved to session_state.")
+
+    st.subheader("Saved (session)")
+    for i, n in enumerate(st.session_state.get("notes_list", [])):
+        st.markdown(f"- {{n[:80]}}…")
+'''
+
+    # ──────────────────────────────────────────────────────────────────
+    # 4) Bar Menu / Bar Tools (preset)
+    #    Keywords: bar, menu, cocktail, drink
+    # ──────────────────────────────────────────────────────────────────
+    if is_any(["bar", "menu", "cocktail", "drink"]):
+        return f'''import streamlit as st
+
+def render():
+    st.header("🍸 {label}")
+    st.caption("Starter for a bar/cocktail menu generator.")
+
+    venue = st.text_input("Venue name", value="Milkbox Bar")
+    theme = st.text_input("Menu theme", value="Tropical")
+    items = st.session_state.setdefault("bar_items", [
+        {{"name": "Sunset Mule", "ingredients": "Vodka, Lime, Ginger beer", "price": 11.0}}
+    ])
+
+    for i, it in enumerate(items):
+        c1, c2, c3, c4 = st.columns([2, 4, 1, 1])
+        it["name"] = c1.text_input("Name", value=it["name"], key=f"bn{i}")
+        it["ingredients"] = c2.text_input("Ingredients", value=it["ingredients"], key=f"bi{i}")
+        it["price"] = c3.number_input("Price", min_value=0.0, value=float(it["price"]), step=0.5, key=f"bp{i}")
+        if c4.button("✖", key=f"bd{i}"):
+            items.pop(i); st.experimental_rerun()
+
+    if st.button("➕ Add item"):
+        items.append({{"name": "", "ingredients": "", "price": 0.0}})
+        st.experimental_rerun()
+
+    st.divider()
+    if st.button("Generate menu preview"):
+        st.success("Menu preview (placeholder). Add PDF export/branding next.")
+'''
+
+    # ──────────────────────────────────────────────────────────────────
+    # 5) Generic stub (fallback for any new idea)
+    # ──────────────────────────────────────────────────────────────────
+    # Always returns a working Streamlit module with a form.
+    clean_desc = (description or "New tool created by the Tool Builder.").replace('"', '\\"')
+    return f'''import streamlit as st
+
+def render():
+    st.header("🧩 {label}")
+    st.write("{clean_desc}".strip())
+
+    with st.form("{slugify(key)}_form", clear_on_submit=False):
+        example = st.text_input("Example input", value="")
+        submitted = st.form_submit_button("Run")
+
+    if submitted:
+        st.success(f"✅ {label} ran! You typed: {{example}}")
+'''
+
