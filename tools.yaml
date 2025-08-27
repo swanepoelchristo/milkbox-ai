@@ -1,19 +1,20 @@
 tools:
-- key: hello
-  label: Hello & About
-  module: tools.hello
-- key: resume
-  label: Resume Builder
-  module: tools.resume
-- key: notes
-  label: Notes
-  module: tools.notes
-- key: builder
-  label: Tool Builder
-  module: tools.builder
-- key: demo 2
-  label: Demo Tool 2
-  module: tools.demo 2
-- key: invoice_gen
-  label: Invoice Generator
-  module: tools.invoice_gen
+  - key: hello
+    label: "Hello & About"
+    module: "tools.hello"
+
+  - key: resume
+    label: "Resume Builder"
+    module: "tools.resume"
+
+  - key: notes
+    label: "Notes"
+    module: "tools.notes"
+
+  - key: invoice_gen
+    label: "Invoice Generator"
+    module: "tools.invoice_gen"
+
+  - key: demo_2
+    label: "Demo Tool 2"
+    module: "tools.demo_2"
