@@ -1,0 +1,7 @@
+{
+  "key": "invoice_gen",
+  "label": "Invoice Generator",
+  "description": "This tool takes user inputs for client, items, and prices, then generates a professional invoice PDF or DOCX.\n",
+  "created_at": "2025-08-27T13:32:25.715465Z",
+  "status": "draft"
+}
