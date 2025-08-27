@@ -7,10 +7,8 @@ import yaml
 
 # ─────────────────────────────────────────────────────────
 # Config / Secrets
-# Set PAID_PIN in Streamlit → App → Settings → Secrets
 # ─────────────────────────────────────────────────────────
-PAID_PIN = os.getenv("PAID_PIN", "")  # e.g. "2468"
-
+PAID_PIN = os.getenv("PAID_PIN", "")  # set in Streamlit → Settings → Secrets
 
 # ─────────────────────────────────────────────────────────
 # Load tools.yaml
@@ -27,19 +25,15 @@ def load_tools() -> List[Dict]:
         st.sidebar.error(f"Failed to read tools.yaml: {e}")
         return []
 
-
 TOOLS = load_tools()
-
 
 # ─────────────────────────────────────────────────────────
 # Session state
 # ─────────────────────────────────────────────────────────
 if "paid_unlocked" not in st.session_state:
     st.session_state.paid_unlocked = False
-
 if "selected_tool_key" not in st.session_state:
     st.session_state.selected_tool_key = None  # store the tool.key we opened
-
 
 # ─────────────────────────────────────────────────────────
 # Helpers
@@ -50,19 +44,18 @@ def is_allowed(tool: Dict) -> bool:
         return True
     return st.session_state.paid_unlocked
 
-
 def split_tools_by_tier(tools: List[Dict]):
-    free = []
-    paid = []
+    free, paid = [], []
     for t in tools:
         (paid if (t.get("tier", "free").lower() == "paid") else free).append(t)
     return free, paid
 
-
 def open_tool(tool_key: str):
     st.session_state.selected_tool_key = tool_key
 
-
+# ─────────────────────────────────────────────────────────
+# Sidebar
+# ─────────────────────────────────────────────────────────
 def render_sidebar(tools: List[Dict]):
     st.sidebar.markdown("### 🔓 Access")
     if not st.session_state.paid_unlocked:
@@ -78,12 +71,10 @@ def render_sidebar(tools: List[Dict]):
         if st.sidebar.button("Lock again"):
             st.session_state.paid_unlocked = False
 
-    # Visible tools after gating
     visible = [t for t in tools if is_allowed(t)]
     free, paid = split_tools_by_tier(visible)
 
     st.sidebar.markdown("### 🧰 Tools")
-
     def render_group(header: str, group_tools: List[Dict]):
         if not group_tools:
             return
@@ -92,35 +83,64 @@ def render_sidebar(tools: List[Dict]):
             st.sidebar.markdown(f"**{t.get('label','(no label)')}**")
             if t.get("desc"):
                 st.sidebar.caption(t["desc"])
-            # "Open" button uses the tool key in the button key to be unique
             if st.sidebar.button(f"Open: {t.get('label','Open')}", key=f"open_{t.get('key','_')}"):
                 open_tool(t.get("key"))
 
-    # Free group
     render_group("Free", free)
-    # Paid group (only shows if unlocked or no PIN set)
     if paid:
         render_group("Pro", paid)
 
-    # Home link
     if st.sidebar.button("🏠 Home"):
         st.session_state.selected_tool_key = None
 
+# ─────────────────────────────────────────────────────────
+# Home grid (cards)
+# ─────────────────────────────────────────────────────────
+def render_home_grid(tools: List[Dict]):
+    st.title("Milkbox AI")
+    st.caption("Pick a tool to get started. Pro tools unlock with a PIN in the sidebar.")
 
+    visible = [t for t in tools if is_allowed(t)]
+    if not visible:
+        st.info("No tools available. Unlock paid tools or check tools.yaml.")
+        return
+
+    # group free / pro visually
+    free, paid = split_tools_by_tier(visible)
+
+    def tool_card(t: Dict):
+        st.markdown(f"**{t.get('label','(no label)')}**")
+        if t.get("desc"):
+            st.caption(t["desc"])
+        st.button("Open", key=f"home_open_{t.get('key','_')}", on_click=open_tool, args=(t.get("key"),))
+        st.markdown("---")
+
+    def render_grid(group_label: str, group_tools: List[Dict]):
+        if not group_tools:
+            return
+        st.subheader(group_label)
+        # 3 columns grid
+        cols = st.columns(3)
+        for idx, t in enumerate(group_tools):
+            with cols[idx % 3]:
+                tool_card(t)
+
+    render_grid("Free tools", free)
+    render_grid("Pro tools", paid)
+
+# ─────────────────────────────────────────────────────────
+# Render selected tool
+# ─────────────────────────────────────────────────────────
 def render_selected_tool(tools: List[Dict]):
     key = st.session_state.selected_tool_key
     if not key:
-        # Home view
-        st.title("Milkbox AI")
-        st.write("Select a tool from the left to get started.")
+        render_home_grid(tools)
         return
 
-    # Find the tool by key among *all* tools (not only visible), but enforce gating.
     tool = next((t for t in tools if t.get("key") == key), None)
     if not tool:
         st.error(f"Tool not found: {key}")
         return
-
     if not is_allowed(tool):
         st.error("This tool is locked. Unlock paid tools in the sidebar to continue.")
         return
@@ -133,8 +153,7 @@ def render_selected_tool(tools: List[Dict]):
 
     st.markdown(f"## {label}")
     try:
-        # Example module path: "tools.invoice_gen" → import "streamlit_app.tools.invoice_gen"
-        mod = importlib.import_module(f"streamlit_app.{module_path}")
+        mod = importlib.import_module(f"streamlit_app.{module_path}")  # e.g. "tools.invoice_gen"
         if hasattr(mod, "render"):
             mod.render()
         else:
@@ -142,11 +161,9 @@ def render_selected_tool(tools: List[Dict]):
     except Exception as e:
         st.exception(e)
 
-
 # ─────────────────────────────────────────────────────────
 # Page layout
 # ─────────────────────────────────────────────────────────
-st.set_page_config(page_title="Milkbox AI", page_icon="🧰", layout="centered")
+st.set_page_config(page_title="Milkbox AI", page_icon="🧰", layout="wide")
 render_sidebar(TOOLS)
 render_selected_tool(TOOLS)
-
