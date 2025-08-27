@@ -1,25 +1,21 @@
 tools:
-- key: hello
-  label: Hello & About
-  module: tools.hello
-- key: resume
-  label: Resume Builder
-  module: tools.resume
-- key: notes
-  label: Notes
-  module: tools.notes
-- key: builder
-  label: Tool Builder
-  module: tools.builder
-- key: invoice_gen
-  label: Invoice Generator
-  module: tools.invoice_gen
-- key: cv_builder
-  label: CV Builder
-  module: tools.cv_builder
-- key: demo_2
-  label: Demo Tool 2
-  module: tools.demo_2
-- key: bar_tools
-  label: Bar Tools (ABV & Tips)
-  module: tools.bar_tools
+  - key: invoice_gen
+    label: "Invoice Generator"
+    module: "tools.invoice_gen"
+    tier: free
+
+  - key: cv_builder
+    label: "CV Builder"
+    module: "tools.cv_builder"
+    tier: free
+
+  - key: bar_tools
+    label: "Bar Tools (ABV & Tips)"
+    module: "tools.bar_tools"
+    tier: free
+
+  # Example future paid tool (international version)
+  - key: cv_builder_pro
+    label: "International CV Builder (Pro)"
+    module: "tools.cv_builder"   # you can point to a separate file later
+    tier: paid
