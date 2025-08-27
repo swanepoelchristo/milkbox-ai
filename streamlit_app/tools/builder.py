@@ -8,13 +8,10 @@ import streamlit as st
 import yaml
 
 # ─────────────────────────────────────────────────────────
-# Secrets / Config  (set in Streamlit Cloud → App → Settings → Secrets)
-#   GITHUB_TOKEN (repo scope)
-#   GITHUB_REPO  e.g. "swanepoelchristo/milkbox-ai"
-#   GITHUB_BRANCH (optional, default "main")
+# Secrets / Config (set in Streamlit Cloud → App → Settings → Secrets)
 # ─────────────────────────────────────────────────────────
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
-GITHUB_REPO = os.getenv("GITHUB_REPO", "")
+GITHUB_REPO = os.getenv("GITHUB_REPO", "")          # e.g. "swanepoelchristo/milkbox-ai"
 GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
 
 API_ROOT = "https://api.github.com"
@@ -24,84 +21,100 @@ HDRS = {
     "X-GitHub-Api-Version": "2022-11-28",
 }
 
+
 # ─────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────
 def b64(s: str) -> str:
     return base64.b64encode(s.encode("utf-8")).decode("utf-8")
 
+
 def slugify(s: str) -> str:
-    s = (s or "").strip().lower()
-    s = s.replace("-", "_").replace(" ", "_")
-    return "".join(ch for ch in s if ch.isalnum() or ch == "_").strip("_")
+    s = s.strip().lower().replace(" ", "_").replace("-", "_")
+    return "".join(ch for ch in s if (ch.isalnum() or ch == "_")).strip("_")
+
 
 def gh_get(path: str, params=None):
     return requests.get(f"{API_ROOT}{path}", headers=HDRS, params=params or {})
 
-def gh_post(path: str, payload: dict):
-    return requests.post(f"{API_ROOT}{path}", headers=HDRS, json=payload)
 
 def gh_put(path: str, payload: dict):
     return requests.put(f"{API_ROOT}{path}", headers=HDRS, json=payload)
+
 
 def gh_content_get(path: str, ref: str = None):
     params = {"ref": ref} if ref else None
     return gh_get(f"/repos/{GITHUB_REPO}/contents/{path}", params=params)
 
-def gh_content_put(path: str, message: str, content_b64: str, branch: str, sha: str | None = None):
-    payload = {"message": message, "content": content_b64, "branch": branch}
+
+def gh_content_put_update(path: str, message: str, content_str: str, branch: str):
+    """
+    Create or update a file in GitHub. If it exists, include SHA for update.
+    """
+    # Check if file exists
+    sha = None
+    existing = gh_content_get(path, ref=branch)
+    if existing.status_code == 200:
+        try:
+            sha = existing.json().get("sha")
+        except Exception:
+            sha = None
+
+    payload = {
+        "message": message,
+        "content": b64(content_str),
+        "branch": branch,
+    }
     if sha:
         payload["sha"] = sha
+
     return gh_put(f"/repos/{GITHUB_REPO}/contents/{path}", payload)
 
-# ─────────────────────────────────────────────────────────
-# YAML load/save for tools.yaml (root of the repo)
-# ─────────────────────────────────────────────────────────
-def fetch_yaml_from_main(path="tools.yaml"):
-    r = gh_content_get(path, ref=GITHUB_BRANCH)
-    if r.status_code == 404:
-        # create an empty YAML structure the first time
-        return {"tools": []}, None, None
-    if r.status_code != 200:
+
+def load_yaml_from_repo(path: str, branch: str):
+    r = gh_content_get(path, ref=branch)
+    if r.status_code == 200:
+        data = r.json()
+        text = base64.b64decode(data["content"]).decode("utf-8")
+        sha = data.get("sha")
+        try:
+            y = yaml.safe_load(text) or {}
+        except Exception as e:
+            return None, None, f"YAML parse error in {path}: {e}"
+        return y, sha, None
+    elif r.status_code == 404:
+        # Not found — we’ll create a new file
+        return {}, None, None
+    else:
         return None, None, f"Could not read {path}: {r.status_code} {r.text}"
 
-    data = r.json()
-    content = base64.b64decode(data["content"]).decode("utf-8")
-    sha = data["sha"]
-    try:
-        y = yaml.safe_load(content) or {}
-    except Exception as e:
-        return None, None, f"YAML parse error in {path}: {e}"
-    return y, sha, None
 
 def ensure_tools_entry(ydata: dict, key: str, label: str):
-    """Ensure the tools list contains this tool with a SAFE module path."""
-    safe_key = slugify(key)
     ydata = ydata or {}
-    tools = list(ydata.get("tools", []))
-    if not any(isinstance(t, dict) and t.get("key") == safe_key for t in tools):
-        tools.append({"key": safe_key, "label": label, "module": f"tools.{safe_key}"})
+    tools = ydata.get("tools", [])
+    # if exists, replace module/label; else append
+    found = False
+    for t in tools:
+        if isinstance(t, dict) and t.get("key") == key:
+            t["label"] = label
+            t["module"] = f"tools.{key}"
+            found = True
+            break
+    if not found:
+        tools.append({"key": key, "label": label, "module": f"tools.{key}"})
     ydata["tools"] = tools
     return ydata
 
-def save_yaml_to_main(ydata: dict, sha: str | None, path="tools.yaml", message="chore: update tools.yaml"):
-    text = yaml.safe_dump(ydata, sort_keys=False, allow_unicode=True)
-    content_b64 = b64(text)
-    return gh_content_put(path, message, content_b64, GITHUB_BRANCH, sha=sha)
 
-# ─────────────────────────────────────────────────────────
-# Tool file + spec file scaffolding
-# ─────────────────────────────────────────────────────────
-def generate_tool_py(safe_key: str, label: str, description: str) -> str:
-    """Return a minimal Streamlit tool module with a render() entrypoint."""
-    desc = (description or "New tool created by the Tool Builder.").replace('"', '\\"').strip()
+def generate_tool_py(key: str, label: str, description: str) -> str:
+    desc = (description or "New tool created by the Tool Builder.").replace('"', '\\"')
     return f'''import streamlit as st
 
 def render():
     st.header("🧩 {label}")
     st.write("{desc}")
 
-    with st.form("{safe_key}_form", clear_on_submit=False):
+    with st.form("{key}_form", clear_on_submit=False):
         example = st.text_input("Example input", value="")
         submitted = st.form_submit_button("Run")
 
@@ -109,113 +122,83 @@ def render():
         st.success(f"✅ {label} ran! You typed: {{example}}")
 '''
 
-def write_tool_file(tool_key: str, label: str, description: str):
-    """Create the Python file for a new tool with a safe slugified filename."""
-    safe_key = slugify(tool_key)
-    code = generate_tool_py(safe_key, label, description)
-    path = f"streamlit_app/tools/{safe_key}.py"
-    msg = f"feat: add {label} tool"
 
-    r = gh_content_put(path, msg, b64(code), GITHUB_BRANCH)
-    if r.status_code not in (200, 201):
-        return False, f"GitHub error {r.status_code}: {r.text}", None
-    return True, f"✅ Created {path} for {label}", safe_key
-
-def write_spec_file(safe_key: str, label: str, description: str):
-    """Store a JSON spec that we (or CI) can use later to flesh out the tool."""
-    spec = {
-        "key": safe_key,
-        "label": label,
-        "description": description,
-        "created": datetime.utcnow().isoformat() + "Z",
-        "status": "draft",
-    }
-    spec_path = f"tool_specs/{safe_key}.json"
-    msg = f"chore: add spec for {label}"
-    r = gh_content_put(spec_path, msg, b64(json.dumps(spec, indent=2)), GITHUB_BRANCH)
-    if r.status_code not in (200, 201):
-        return False, f"GitHub error {r.status_code}: {r.text}", spec_path
-    return True, f"📝 Wrote {spec_path}", spec_path
-
-def open_issue_for_spec(spec_path: str, label: str, description: str):
-    title = f"[Tool Spec] {label}"
-    body = f"""A new tool spec was generated by the Tool Builder.
-
-**Spec file:** `{spec_path}`
-
-**Summary**
-{description or ""}
-
-Please implement the first working version using this spec, and link the PR here.
-"""
-    r = gh_post(f"/repos/{GITHUB_REPO}/issues", {"title": title, "body": body})
-    return r
-
-# ─────────────────────────────────────────────────────────
-# UI
-# ─────────────────────────────────────────────────────────
 def render():
     st.header("🛠️ Tool Builder")
-    st.caption("This tool takes a name + description, creates a scaffold tool in GitHub, then registers it in `tools.yaml`.")
 
-    if not GITHUB_TOKEN or not GITHUB_REPO:
+    if not (GITHUB_TOKEN and GITHUB_REPO):
         st.error("Missing GitHub secrets. Please set GITHUB_TOKEN and GITHUB_REPO in Streamlit Secrets.")
-        with st.expander("Expected secrets"):
-            st.code(
-                "GITHUB_TOKEN = 'ghp_xxx'  # with repo scope\n"
-                "GITHUB_REPO  = 'owner/repo'\n"
-                "GITHUB_BRANCH = 'main'\n",
-                language="toml",
-            )
         return
 
     with st.form("builder_form", clear_on_submit=False):
-        tool_key = st.text_input("Tool key (e.g. invoice_gen)")
-        tool_label = st.text_input("Tool label (e.g. Invoice Generator)")
-        description = st.text_area("Short description (what this tool should do)")
-
+        key_raw = st.text_input("Tool key (e.g. invoice_gen)", value="")
+        label = st.text_input("Tool label (e.g. Invoice Generator)", value="")
+        short_desc = st.text_area("Short description (what this tool should do)",
+                                  value="", height=100)
         submitted = st.form_submit_button("Generate tool")
 
     if not submitted:
         return
 
-    if not tool_key or not tool_label:
-        st.error("Please enter both a tool key and label.")
+    key = slugify(key_raw)
+    if not key or not label:
+        st.error("Tool key and label are required.")
         return
 
-    safe_key = slugify(tool_key)
+    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
 
-    # 1) Write the tool .py file
-    ok, msg, safe_key = write_tool_file(tool_key, tool_label, description)
-    if ok:
-        st.success(msg)
+    # 1) Write or update tool_specs/<key>.json (optional spec record)
+    spec_path = f"tool_specs/{key}.json"
+    spec_obj = {
+        "key": key,
+        "label": label,
+        "description": short_desc,
+        "created_at": ts,
+        "source": "Tool Builder",
+    }
+    r_spec = gh_content_put_update(
+        spec_path,
+        message=f"chore(builder): write/update spec for {key}",
+        content_str=json.dumps(spec_obj, indent=2) + "\n",
+        branch=GITHUB_BRANCH,
+    )
+    if r_spec.status_code not in (200, 201):
+        st.warning(f"Spec write warning ({r_spec.status_code}): {r_spec.text}")
     else:
-        st.error(msg)
+        st.success(f"Wrote/updated {spec_path}")
+
+    # 2) Write or update streamlit_app/tools/<key>.py
+    tool_code = generate_tool_py(key, label, short_desc)
+    tool_py_path = f"streamlit_app/tools/{key}.py"
+    r_tool = gh_content_put_update(
+        tool_py_path,
+        message=f"feat(builder): add/update tool {key}",
+        content_str=tool_code,
+        branch=GITHUB_BRANCH,
+    )
+    if r_tool.status_code not in (200, 201):
+        st.error(f"GitHub error writing tool ({r_tool.status_code}): {r_tool.text}")
         return
+    st.success(f"Created/updated {tool_py_path}")
 
-    # 2) Write the JSON spec
-    ok2, msg2, spec_path = write_spec_file(safe_key, tool_label, description)
-    if ok2:
-        st.success(msg2)
-    else:
-        st.warning(msg2)
-
-    # 3) Register in tools.yaml
-    y, sha, err = fetch_yaml_from_main("tools.yaml")
+    # 3) Read tools.yaml (create if missing), ensure entry, and write/update
+    ydata, _, err = load_yaml_from_repo("tools.yaml", GITHUB_BRANCH)
     if err:
         st.error(err)
         return
-    updated_yaml = ensure_tools_entry(y, safe_key, tool_label)
-    r = save_yaml_to_main(updated_yaml, sha, path="tools.yaml", message=f"chore: register {tool_label} in tools.yaml")
-    if r.status_code in (200, 201):
-        st.success("📇 Registered the tool in tools.yaml. It should appear in the sidebar after reload.")
-    else:
-        st.error(f"GitHub error updating tools.yaml: {r.status_code} {r.text}")
-        return
 
-    # 4) Open an issue to track completion
-    r_issue = open_issue_for_spec(spec_path, tool_label, description)
-    if r_issue.status_code in (200, 201):
-        st.info("🔗 Opened an Issue for this tool’s spec.")
-    else:
-        st.warning(f"Could not open issue automatically ({r_issue.status_code}). You can add it later.")
+    ydata = ensure_tools_entry(ydata, key, label)
+    yaml_text = yaml.safe_dump(ydata, sort_keys=False, allow_unicode=True)
+
+    r_yaml = gh_content_put_update(
+        "tools.yaml",
+        message=f"chore(builder): register tool {key} in tools.yaml",
+        content_str=yaml_text,
+        branch=GITHUB_BRANCH,
+    )
+    if r_yaml.status_code not in (200, 201):
+        st.error(f"GitHub error updating tools.yaml ({r_yaml.status_code}): {r_yaml.text}")
+        return
+    st.success("Registered the tool in tools.yaml. It should appear in the sidebar now.")
+
+    st.code(tool_code, language="python")
