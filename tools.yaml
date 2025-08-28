@@ -2,50 +2,32 @@ tools:
   - key: hello
     label: Hello & About
     module: tools.hello
-    tier: free
-    desc: Greeting demo and about panel.
 
   - key: notes
     label: Notes
     module: tools.notes
-    tier: free
-    desc: Simple scratchpad stored in session.
 
   - key: invoice_gen
     label: Invoice Generator
     module: tools.invoice_gen
-    tier: free
-    desc: Create a simple invoice from line items and export.
 
   - key: bar_tools
     label: Bar Tools (ABV & Tips)
     module: tools.bar_tools
-    tier: free
-    desc: ABV calculator and tip/bill splitter.
 
   - key: cv_builder
     label: CV Builder
     module: tools.cv_builder
-    tier: free
-    desc: International CV builder with import/export.
 
   - key: demo_2
     label: Demo Tool 2
     module: tools.demo_2
-    tier: free
-    desc: Sandbox demo made by the Tool Builder.
 
-  # Optional legacy (keep only if you still use it)
   - key: resume
     label: Resume Builder (legacy)
     module: tools.resume
-    tier: free
-    desc: Early resume prototype.
 
-  # Optional — only include if you actually have tools/cv_builder_pro.py ready.
   - key: cv_builder_pro
     label: International CV Builder (Pro)
     module: tools.cv_builder_pro
-    tier: pro
-    desc: Templates, locale rules, advanced formatting, premium exports.
 
