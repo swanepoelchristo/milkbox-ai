@@ -1,156 +1,185 @@
-# streamlit_app/tools/food_safety.py
-# Milky Roads AI — Food Safety dashboard (with Regulatory Watch card)
-
-from __future__ import annotations
-import os
 import json
+import os
 from pathlib import Path
-from datetime import datetime
+from typing import Dict, List, Optional
+
 import streamlit as st
+import yaml
 
-APP_ROOT = Path(__file__).resolve().parents[2]  # repo root
-STANDARDS_DIR = APP_ROOT / "standards"
+APP_ROOT = Path(__file__).resolve().parents[1]           # streamlit_app/
+REPO_ROOT = APP_ROOT.parent                               # repo root
+STANDARDS_DIR = REPO_ROOT / "standards"
+WATCHLIST = STANDARDS_DIR / "watchlist.yaml"
+REG_STATE = STANDARDS_DIR / "reg_state.json"
 WATCH_LOG = STANDARDS_DIR / "watch_log.md"
-STATE_JSON = STANDARDS_DIR / ".reg_state.json"
-WATCHLIST = APP_ROOT / "standards" / "watchlist.yaml"
+DEPT_CFG = STANDARDS_DIR / "departments.yaml"
 
-# Best-effort repo slug for links, can be overridden by secrets
-# e.g. "swanepoelchristo/milkbox-ai"
-REPO_SLUG = (
-    st.secrets.get("GITHUB_REPO", "")
-    or os.getenv("GITHUB_REPO", "")
-    or "swanepoelchristo/milkbox-ai"  # <— fallback; harmless if it’s yours
-)
-ACTIONS_URL = f"https://github.com/{REPO_SLUG}/actions/workflows/reg-watch.yml"
-WATCHLIST_URL = f"https://github.com/{REPO_SLUG}/blob/main/standards/watchlist.yaml"
+# Optional secrets for protected URLs (visible hint only in UI)
+SECRETS_HINT = [
+    "DOC_ISO22000_URL",
+    "DOC_HACCP_URL",
+    "DOC_LOCAL_REG_URL",
+    "DOC_SOP_INDEX_URL",
+]
 
+# ---------- small helpers ----------
 
-def _read_text(path: Path, fallback: str = "") -> str:
+def read_yaml(p: Path) -> Optional[dict]:
     try:
-        return path.read_text(encoding="utf-8")
+        if not p.exists():
+            return None
+        with p.open("r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
     except Exception:
-        return fallback
+        return None
 
+def read_text(p: Path) -> str:
+    if not p.exists():
+        return ""
+    return p.read_text(encoding="utf-8", errors="ignore")
 
-def _read_json(path: Path) -> dict:
+def read_json(p: Path) -> dict:
+    if not p.exists():
+        return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(p.read_text(encoding="utf-8"))
     except Exception:
         return {}
 
+def get_departments() -> List[dict]:
+    data = read_yaml(DEPT_CFG) or {}
+    return data.get("departments", [])
 
-def _nice_ts(ts: str | int | float | None) -> str:
+def list_sops(dir_path: Path) -> List[str]:
+    if not dir_path.exists():
+        return []
+    files = []
+    for p in dir_path.glob("**/*"):
+        if p.is_file():
+            rel = p.relative_to(REPO_ROOT).as_posix()
+            files.append(rel)
+    return sorted(files)
+
+def has_secret(name: str) -> bool:
     try:
-        if isinstance(ts, (int, float)):
-            return datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d %H:%M UTC")
-        if isinstance(ts, str):
-            # try ISO first
-            try:
-                return datetime.fromisoformat(ts.replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M UTC")
-            except Exception:
-                return ts
+        return st.secrets.get(name) is not None
     except Exception:
-        pass
-    return "—"
+        return False
 
+# ---------- UI blocks ----------
 
-def render() -> None:
-    st.header("Milky Roads AI — Food Safety")
+def ui_quick_access():
+    with st.expander("Quick access — Documents & SOPs", expanded=False):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.write("📄 **ISO 22000**")
+            st.caption("Add a public URL in `watchlist.yaml` or set `DOC_ISO22000_URL` in Streamlit secrets.")
+            if has_secret("DOC_ISO22000_URL"):
+                st.success("Secret available: DOC_ISO22000_URL")
+        with col2:
+            st.write("📄 **HACCP**")
+            st.caption("Add a public URL in `watchlist.yaml` or set `DOC_HACCP_URL` in Streamlit secrets.")
+            if has_secret("DOC_HACCP_URL"):
+                st.success("Secret available: DOC_HACCP_URL")
+        with col3:
+            st.write("🏛️ **Local/State Regulation**")
+            st.caption("Add a public URL in `watchlist.yaml` or set `DOC_LOCAL_REG_URL` in Streamlit secrets.")
+            if has_secret("DOC_LOCAL_REG_URL"):
+                st.success("Secret available: DOC_LOCAL_REG_URL")
 
-    # --- Quick links / placeholders (simple, non-persistent operators' inputs) ---
-    with st.expander("📄 Quick access — Documents & SOPs", expanded=False):
-        st.caption("Paste links for fast access (no storage yet; permanent links belong in **standards/watchlist.yaml** or Streamlit **Secrets**).")
-        c1, c2 = st.columns(2)
-        with c1:
-            iso = st.text_input("ISO 22000 URL", placeholder="https://...")
-            haccp = st.text_input("Codex HACCP URL", placeholder="https://...")
-        with c2:
-            local = st.text_input("Local/Regulation URL", placeholder="https://...")
-            sop = st.text_input("Company SOP Index URL", placeholder="https://...")
-        st.write("Open:")
-        cols = st.columns(4)
-        if iso: cols[0].link_button("ISO 22000", iso)
-        if haccp: cols[1].link_button("HACCP", haccp)
-        if local: cols[2].link_button("Local Reg", local)
-        if sop: cols[3].link_button("SOP Index", sop)
-
-    # --- Regulatory Watch card ---
-    st.markdown("### 🔎 Regulatory Watch")
+def ui_reg_watch():
+    st.subheader("🔬 Regulatory Watch")
     st.caption(
-        "This reads the daily/triggered checks from **standards/watch_log.md** and the current "
-        "state in **standards/.reg_state.json**. The GitHub Action *Regulatory Watch* is "
-        "scheduled and can also be run on demand."
+        "This reads the daily/triggered checks from `standards/watch_log.md` "
+        "and the current state in `standards/reg_state.json`. "
+        "The GitHub Action **Regulatory Watch** runs on a schedule and can also be run on demand."
     )
-
-    # Summary row
-    cols = st.columns([1, 1, 2])
+    cols = st.columns([1, 1, 3])
     with cols[0]:
-        st.link_button("▶️ Run now", ACTIONS_URL, help="Open the GitHub Action to trigger a check")
+        st.link_button("▶️ Run now", url="https://github.com/swanepoelchristo/milkbox-ai/actions", help="Open Actions and dispatch Reg Watch")
     with cols[1]:
-        st.link_button("🗂️ Edit watchlist.yaml", WATCHLIST_URL, help="Open your watchlist to add/update documents")
+        st.link_button("📝 Edit watchlist.yaml", url="https://github.com/swanepoelchristo/milkbox-ai/blob/main/standards/watchlist.yaml")
+
     with cols[2]:
-        st.write(
-            "Secrets supported (optional): `DOC_ISO22000_URL`, `DOC_HACCP_URL`, "
-            "`DOC_LOCAL_REG_URL`, `DOC_SOP_INDEX_URL`."
-        )
+        st.caption("Secrets supported (optional): " + ", ".join([f"`{s}`" for s in SECRETS_HINT]))
 
-    # Current state
-    state = _read_json(STATE_JSON)
-    with st.expander("📌 Current state (.reg_state.json)", expanded=False):
-        if not state:
-            st.info("No state found yet. After the first Action run, this will show ETag/Last-Modified/Length for each document.")
+    with st.expander("📦 Current state (`reg_state.json`)", expanded=False):
+        data = read_json(REG_STATE)
+        if data:
+            st.json(data)
         else:
-            st.json(state)
+            st.info("No `reg_state.json` yet. Trigger the Action once, then refresh.")
 
-    # Watch log
-    st.markdown("#### 🧾 Latest watch log")
-    if WATCH_LOG.exists():
-        # Show just the last N lines for readability
-        raw = _read_text(WATCH_LOG, "")
-        if raw:
-            lines = raw.strip().splitlines()
-            last = "\n".join(lines[-120:])  # last ~120 lines
-            st.markdown(last or "_(empty log)_")
-        else:
-            st.info("Log is empty.")
+    st.subheader("🧾 Latest watch log")
+    log_txt = read_text(WATCH_LOG)
+    if log_txt.strip():
+        st.code(log_txt, language="markdown")
     else:
-        st.info("No watch_log.md yet. Trigger the Action once, then refresh.")
+        st.info("No `watch_log.md` yet. Trigger the Action once, then refresh.")
 
-    # Footer / hints
-    st.caption(
-        "Tip: set your repository secrets for protected URLs, or put public URLs directly in "
-        "`standards/watchlist.yaml`. The Action will update the state & log and commit changes."
-    )
-import streamlit as st
+def ui_departments():
+    st.subheader("🏭 Departments")
+    depts = get_departments()
+    if not depts:
+        st.warning("No departments found. Add them in `standards/departments.yaml`.")
+        return
 
-# shared UI components
-try:
-    from components.reg_watch import render_reg_watch
-except Exception:  # fail-safe if path changes
-    def render_reg_watch(*_, **__):
-        st.warning("Regulatory Watch component missing. Ensure `components/reg_watch.py` exists.")
+    # Sidebar style picker
+    names = [f"{d.get('name','(unnamed)')}  —  {d.get('key')}" for d in depts]
+    idx = st.selectbox("Choose a department", range(len(depts)), format_func=lambda i: names[i])
+    d = depts[idx]
 
-try:
-    from components.quick_links import render_quick_links_docs
-except Exception:
-    def render_quick_links_docs():
-        st.warning("Quick Links component missing. Ensure `components/quick_links.py` exists.")
+    st.markdown(f"### {d.get('name','Department')}")
+    meta_cols = st.columns(3)
+    with meta_cols[0]:
+        st.metric("Owner", d.get("owner", "—"))
+    with meta_cols[1]:
+        sop_dir_rel = d.get("sop_dir", "")
+        sop_dir_abs = (REPO_ROOT / sop_dir_rel).resolve()
+        st.metric("SOP folder", sop_dir_rel or "—")
+    with meta_cols[2]:
+        inbox = d.get("inbox_url", "")
+        if inbox:
+            st.link_button("📤 Open department drive", inbox)
+        else:
+            st.button("📤 Set department drive (URL)", disabled=True, help="Add `inbox_url` in departments.yaml or store it as a secret later.")
 
+    expected = d.get("expected_sops", [])
+    sop_dir_rel = d.get("sop_dir", "")
+    sop_dir_abs = (REPO_ROOT / sop_dir_rel).resolve() if sop_dir_rel else None
+    found_files = list_sops(sop_dir_abs) if sop_dir_abs else []
+
+    # Make an index of file basenames for rough matching (so 'SOP-001 Personal Hygiene.pdf' counts)
+    found_names = {Path(f).stem for f in found_files}
+
+    st.markdown("#### 📚 SOP checklist")
+    if not expected:
+        st.info("No expected SOP list provided in departments.yaml.")
+    else:
+        ok, miss = [], []
+        for sop in expected:
+            # mark as present if any file stem contains the start of SOP title
+            present = any(sop.lower().split()[0] in s.lower() for s in found_names)  # simple heuristic on the prefix
+            (ok if present else miss).append(sop)
+
+        if ok:
+            st.success("Present:")
+            st.write("\n".join([f"• {x}" for x in ok]))
+        if miss:
+            st.warning("Missing:")
+            st.write("\n".join([f"• {x}" for x in miss]))
+            st.caption("Place files under the department SOP folder to resolve (see path shown above).")
+
+    with st.expander("🔎 SOP files detected in repository", expanded=False):
+        if found_files:
+            st.write("\n".join([f"- `{f}`" for f in found_files]))
+        else:
+            st.info("No SOP files found yet in this department folder.")
 
 def render():
     st.title("Milky Roads AI — Food Safety")
-
-    # 1) Quick access to key docs & SOP index
-    render_quick_links_docs()
-
-    # 2) Your domain UI could go here (temperature logs, CCP checks, uploaders, etc)
-    #    We keep the structure but don't enforce any data yet—no crashes.
-    st.markdown("### Temperature Logs")
-    st.info(
-        "Drop your existing log UI here. If you had previous code, paste it above this call. "
-        "This placeholder ensures the page renders even when no data source is configured."
-    )
-
-    # 3) Shared Regulatory Watch card
+    ui_quick_access()
     st.divider()
-    render_reg_watch("🔎 Regulatory Watch")
+    ui_reg_watch()
+    st.divider()
+    ui_departments()
