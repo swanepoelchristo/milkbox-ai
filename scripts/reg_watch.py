@@ -1,41 +1,25 @@
 #!/usr/bin/env python3
-"""
-Regulatory Watcher
-- Reads standards/watchlist.yaml
-- Resolves each document's URL from (1) GitHub Secret name, (2) inline url field, or (3) standards/urls/<key>.txt
-- Fetches remote HEAD metadata (ETag, Last-Modified, Content-Length, final URL)
-- Compares against previous snapshot in standards/.reg_state.json
-- If changes are detected:
-    * updates standards/.reg_state.json
-    * appends an entry into standards/watch_log.md
-    * returns exit code 0 (workflow will commit the changes)
-"""
-
 from __future__ import annotations
-import os
-import sys
-import json
-import time
+import os, sys, json, time
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, List
+from pathlib import Path
 
 import requests
 import yaml
-from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]         # repo root
-WATCHLIST = ROOT / "standards" / "watchlist.yaml"
-STATE_FILE = ROOT / "standards" / ".reg_state.json"
-URLS_DIR = ROOT / "standards" / "urls"
-LOG_MD = ROOT / "standards" / "watch_log.md"
+WATCHLIST   = ROOT / "standards" / "watchlist.yaml"
+LOC_YAML    = ROOT / "standards" / "locations.yaml"
+STATE_FILE  = ROOT / "standards" / "reg_state.json"
+WATCH_LOG   = ROOT / "standards" / "watch_log.md"
+URLS_DIR    = ROOT / "standards" / "urls"
 
 HEADERS = {
-    "User-Agent": "Milkbox-AI-RegWatch/1.0 (+https://github.com/)",
+    "User-Agent": "Milkbox-AI-RegWatch/1.1 (+https://github.com/)",
     "Accept": "*/*",
 }
-
 TIMEOUT = 20
-
 
 @dataclass
 class Doc:
@@ -44,151 +28,102 @@ class Doc:
     secret: Optional[str] = None
     url: Optional[str] = None
 
+def load_yaml(p: Path) -> dict:
+    if not p.exists(): return {}
+    try: return yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    except Exception: return {}
 
 def load_watchlist() -> List[Doc]:
-    if not WATCHLIST.exists():
-        print(f"ERROR: watchlist not found: {WATCHLIST}", file=sys.stderr)
-        sys.exit(1)
-
-    y = yaml.safe_load(WATCHLIST.read_text(encoding="utf-8")) or {}
+    y = load_yaml(WATCHLIST)
     docs = []
     for item in (y.get("docs") or []):
         key = item.get("key")
         name = item.get("name", key)
         secret = item.get("secret") or None
         url = item.get("url") or None
-        if not key:
-            print("WARNING: skipping item without 'key'", file=sys.stderr)
-            continue
+        if not key: continue
         docs.append(Doc(key=key, name=name, secret=secret, url=url))
     return docs
 
-
 def resolve_url(doc: Doc) -> Optional[str]:
-    # 1) From secret
+    # Priority: Secret → locations.yaml (by secret key) → inline url → urls/<key>.txt
     if doc.secret:
-        env_val = os.getenv(doc.secret)
-        if env_val:
-            return env_val.strip()
-
-    # 2) From inline url
+        env_val = os.getenv(doc.secret, "").strip()
+        if env_val: return env_val
+    locs = load_yaml(LOC_YAML)
+    if doc.secret and locs.get(doc.secret):
+        return (locs.get(doc.secret) or "").strip()
     if doc.url:
         return doc.url.strip()
-
-    # 3) From fallback file standards/urls/<key>.txt
-    fallback = URLS_DIR / f"{doc.key}.txt"
-    if fallback.exists():
-        return fallback.read_text(encoding="utf-8").strip()
-
-    return None
-
+    fb = (URLS_DIR / f"{doc.key}.txt")
+    return (fb.read_text(encoding="utf-8").strip() if fb.exists() else None)
 
 def head_metadata(url: str) -> Dict[str, Any]:
-    """
-    Try HEAD first; if blocked, fall back to GET with minimal range.
-    """
-    s = requests.Session()
-    s.headers.update(HEADERS)
-
+    s = requests.Session(); s.headers.update(HEADERS)
     try:
         r = s.head(url, allow_redirects=True, timeout=TIMEOUT)
-    except requests.RequestException as e:
-        # Fall back to a tiny GET
+    except requests.RequestException:
         try:
             r = s.get(url, headers={"Range": "bytes=0-0", **HEADERS}, allow_redirects=True, timeout=TIMEOUT, stream=True)
         except requests.RequestException as e2:
             return {"ok": False, "error": f"{type(e2).__name__}: {e2}"}
     final_url = str(r.url)
-
     etag = r.headers.get("ETag", "")
     last_mod = r.headers.get("Last-Modified", "")
     clen = r.headers.get("Content-Length", "")
-    # Some servers don’t return content-length on HEAD; keep blank in that case
-
-    # Build a signature that changes if the resource changes
     signature = f"status={r.status_code}|url={final_url}|etag={etag}|last={last_mod}|len={clen}"
-    return {
-        "ok": True,
-        "status": r.status_code,
-        "final_url": final_url,
-        "etag": etag,
-        "last_modified": last_mod,
-        "content_length": clen,
-        "signature": signature,
-        "checked_at": int(time.time()),
-    }
+    return {"ok": True, "status": r.status_code, "final_url": final_url, "etag": etag,
+            "last_modified": last_mod, "content_length": clen, "signature": signature,
+            "checked_at": int(time.time())}
 
-
-def load_state() -> Dict[str, Any]:
+def load_state() -> dict:
     if STATE_FILE.exists():
-        try:
-            return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            pass
+        try: return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        except Exception: pass
     return {}
 
-
-def save_state(state: Dict[str, Any]) -> None:
+def save_state(state: dict) -> None:
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
 
-
-def append_log(changes: List[Dict[str, Any]]) -> None:
-    LOG_MD.parent.mkdir(parents=True, exist_ok=True)
-    ts = time.strftime("%Y-%m-%d %H:%M:%S %Z", time.gmtime())
-    lines = []
-    lines.append(f"## {ts}")
+def append_log(changes: List[dict]) -> None:
+    WATCH_LOG.parent.mkdir(parents=True, exist_ok=True)
+    ts = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+    lines = [f"## {ts}"]
     for ch in changes:
         name = ch['name']
         url = ch['meta'].get('final_url') or ch['url']
         old_sig = ch.get("old_signature", "(none)")
         new_sig = ch['meta'].get('signature', '')
-        lines.append(f"- **{name}** changed → {url}")
-        lines.append(f"  - old: `{old_sig}`")
-        lines.append(f"  - new: `{new_sig}`")
-    lines.append("")  # trailing newline
-    with LOG_MD.open("a", encoding="utf-8") as f:
+        lines += [f"- **{name}** changed → {url}",
+                  f"  - old: `{old_sig}`",
+                  f"  - new: `{new_sig}`"]
+    lines.append("")
+    with WATCH_LOG.open("a", encoding="utf-8") as f:
         f.write("\n".join(lines))
-
 
 def main() -> int:
     docs = load_watchlist()
     state = load_state()
-    updated = []
-    errors = []
+    updated, errors = [], []
 
     for doc in docs:
         url = resolve_url(doc)
         if not url:
-            errors.append((doc.name, "No URL resolved (secret/url/fallback missing)"))
+            errors.append((doc.name, "No URL resolved (secret/locations.yaml/url/fallback missing)"))
             continue
-
         meta = head_metadata(url)
         if not meta.get("ok"):
-            errors.append((doc.name, meta.get("error", "unknown error")))
-            continue
-
+            errors.append((doc.name, meta.get("error", "unknown error"))); continue
         prev_sig = ((state.get(doc.key) or {}).get("signature")) if state else None
         new_sig = meta["signature"]
         if new_sig != prev_sig:
-            updated.append({
-                "key": doc.key,
-                "name": doc.name,
-                "url": url,
-                "old_signature": prev_sig,
-                "meta": meta
-            })
-            state[doc.key] = {
-                "name": doc.name,
-                "url": url,
-                **meta
-            }
+            updated.append({"key": doc.key, "name": doc.name, "url": url, "old_signature": prev_sig, "meta": meta})
+            state[doc.key] = {"name": doc.name, "url": url, **meta}
 
-    # Write state and log if anything changed
     if updated:
-        print(f"Detected {len(updated)} change(s). Updating state + log...")
-        save_state(state)
-        append_log(updated)
+        print(f"Detected {len(updated)} change(s). Updating state + log…")
+        save_state(state); append_log(updated)
     else:
         print("No changes detected.")
 
@@ -197,9 +132,7 @@ def main() -> int:
         for name, err in errors:
             print(f" - {name}: {err}")
 
-    # Always exit 0 so the workflow can commit log/state when changed.
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())
