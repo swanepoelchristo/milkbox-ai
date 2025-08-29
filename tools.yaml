@@ -29,3 +29,7 @@ tools:
 - key: food_safety
   label: "Milky Roads AI \u2014 Food Safety"
   module: tools.food_safety
+tools:
+  - key: food_safety
+    label: "Food Safety"
+    module: "tools.food_safety"
