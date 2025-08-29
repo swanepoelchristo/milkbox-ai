@@ -1,40 +1,35 @@
-tools:
-  - key: hello
-    name: Hello & About
-    module: tools.hello
+- key: hello
+  label: Hello & About
+  module: "tools.hello"
 
-  - key: notes
-    name: Notes
-    module: tools.notes
+- key: notes
+  label: Notes
+  module: "tools.notes"
 
-  - key: invoice_gen
-    name: Invoice Generator
-    module: tools.invoice_gen
+- key: invoice_gen
+  label: Invoice Generator
+  module: "tools.invoice_gen"
 
-  - key: bar_tools
-    name: Bar Tools (ABV & Tips)
-    module: tools.bar_tools
+- key: bar_tools
+  label: Bar Tools (ABV & Tips)
+  module: "tools.bar_tools"
 
-  - key: cv_builder
-    name: CV Builder
-    module: tools.cv_builder
+- key: cv_builder
+  label: CV Builder
+  module: "tools.cv_builder"
 
-  - key: cv_builder_pro
-    name: International CV Builder (Pro)
-    module: tools.cv_builder_pro
+- key: cv_builder_pro
+  label: International CV Builder (Pro)
+  module: "tools.cv_builder_pro"
 
-  - key: demo_2
-    name: Demo Tool 2
-    module: tools.demo_2
+- key: demo_2
+  label: Demo Tool 2
+  module: "tools.demo_2"
 
-  - key: resume
-    name: Resume Builder (legacy)
-    module: tools.resume
+- key: builder
+  label: Tool Builder
+  module: "tools.builder"
 
-  - key: builder
-    name: Tool Builder
-    module: tools.builder
-
-  - key: food_safety
-    name: Milky Roads AI — Food Safety
-    module: tools.food_safety
+- key: food_safety
+  label: Food Safety
+  module: "tools.food_safety"
