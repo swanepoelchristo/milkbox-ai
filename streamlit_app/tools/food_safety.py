@@ -121,3 +121,36 @@ def render() -> None:
         "Tip: set your repository secrets for protected URLs, or put public URLs directly in "
         "`standards/watchlist.yaml`. The Action will update the state & log and commit changes."
     )
+import streamlit as st
+
+# shared UI components
+try:
+    from components.reg_watch import render_reg_watch
+except Exception:  # fail-safe if path changes
+    def render_reg_watch(*_, **__):
+        st.warning("Regulatory Watch component missing. Ensure `components/reg_watch.py` exists.")
+
+try:
+    from components.quick_links import render_quick_links_docs
+except Exception:
+    def render_quick_links_docs():
+        st.warning("Quick Links component missing. Ensure `components/quick_links.py` exists.")
+
+
+def render():
+    st.title("Milky Roads AI — Food Safety")
+
+    # 1) Quick access to key docs & SOP index
+    render_quick_links_docs()
+
+    # 2) Your domain UI could go here (temperature logs, CCP checks, uploaders, etc)
+    #    We keep the structure but don't enforce any data yet—no crashes.
+    st.markdown("### Temperature Logs")
+    st.info(
+        "Drop your existing log UI here. If you had previous code, paste it above this call. "
+        "This placeholder ensures the page renders even when no data source is configured."
+    )
+
+    # 3) Shared Regulatory Watch card
+    st.divider()
+    render_reg_watch("🔎 Regulatory Watch")
