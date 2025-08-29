@@ -1,160 +1,214 @@
 import os
-import json
 import base64
+import json
 from datetime import datetime
-from typing import Optional, Tuple
 
 import requests
 import streamlit as st
 import yaml
 
 # ─────────────────────────────────────────────────────────
-# Secrets / Config  (set in Streamlit Cloud → App → Settings → Secrets)
-#   GITHUB_TOKEN:  a PAT with 'repo' scope
-#   GITHUB_REPO:   "owner/repo"   e.g. "swanepoelchristo/milkbox-ai"
-#   GITHUB_BRANCH: default branch (optional, defaults to "main")
+# Config from Streamlit Secrets (set in Streamlit Cloud)
 # ─────────────────────────────────────────────────────────
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
-GITHUB_REPO = os.getenv("GITHUB_REPO", "")
+GITHUB_TOKEN  = os.getenv("GITHUB_TOKEN", "")
+GITHUB_REPO   = os.getenv("GITHUB_REPO", "")          # e.g. "swanepoelchristo/milkbox-ai"
 GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
+API_ROOT      = "https://api.github.com"
 
-API_ROOT = "https://api.github.com"
 HDRS = {
     "Authorization": f"token {GITHUB_TOKEN}",
     "Accept": "application/vnd.github+json",
     "X-GitHub-Api-Version": "2022-11-28",
 }
 
+
 # ─────────────────────────────────────────────────────────
-# Small helpers
+# GitHub helpers
 # ─────────────────────────────────────────────────────────
-def b64(s: str) -> str:
-    return base64.b64encode(s.encode("utf-8")).decode("utf-8")
-
-
-def slugify(s: str) -> str:
-    s = (s or "").strip().lower().replace(" ", "_").replace("-", "_")
-    return "".join(ch for ch in s if (ch.isalnum() or ch == "_")).strip("_")
-
-
-def py_str(s: str) -> str:
-    """
-    Return a safe Python string literal for s.
-    Uses json.dumps so quotes/newlines are escaped correctly.
-    """
-    return json.dumps("" if s is None else str(s))
-
-
-def gh_get(path: str, params=None):
+def _gh_get(path: str, params=None):
     return requests.get(f"{API_ROOT}{path}", headers=HDRS, params=params or {})
 
-
-def gh_post(path: str, payload: dict):
-    return requests.post(f"{API_ROOT}{path}", headers=HDRS, json=payload)
-
-
-def gh_put(path: str, payload: dict):
+def _gh_put(path: str, payload: dict):
     return requests.put(f"{API_ROOT}{path}", headers=HDRS, json=payload)
 
+def _gh_post(path: str, payload: dict):
+    return requests.post(f"{API_ROOT}{path}", headers=HDRS, json=payload)
 
-def gh_content_get(path: str, ref: Optional[str] = None):
-    params = {"ref": ref} if ref else None
-    return gh_get(f"/repos/{GITHUB_REPO}/contents/{path}", params=params)
+def _b64(text: str) -> str:
+    return base64.b64encode(text.encode("utf-8")).decode("utf-8")
 
+def _read_file_and_sha(repo_path: str, ref: str = None):
+    """Return (text_or_None, sha_or_None, err_or_None)"""
+    r = _gh_get(f"/repos/{GITHUB_REPO}/contents/{repo_path}", params={"ref": ref} if ref else None)
+    if r.status_code == 404:
+        return None, None, None
+    if r.status_code != 200:
+        return None, None, f"GET {repo_path} failed: {r.status_code} {r.text}"
+    data = r.json()
+    try:
+        text = base64.b64decode(data["content"]).decode("utf-8")
+    except Exception as e:
+        return None, None, f"decode error: {e}"
+    return text, data.get("sha"), None
 
-def gh_content_put(path: str, message: str, content_b64: str, branch: str, sha: Optional[str] = None):
-    payload = {"message": message, "content": content_b64, "branch": branch}
+def _create_or_update_file(repo_path: str, content_text: str, commit_message: str):
+    """
+    Create or update a file using the correct sha (if present) so we *update* rather than overwrite.
+    Returns (ok, message).
+    """
+    existing_text, sha, err = _read_file_and_sha(repo_path, ref=GITHUB_BRANCH)
+    if err:
+        return False, err
+
+    payload = {
+        "message": commit_message,
+        "content": _b64(content_text),
+        "branch": GITHUB_BRANCH,
+    }
     if sha:
         payload["sha"] = sha
-    return gh_put(f"/repos/{GITHUB_REPO}/contents/{path}", payload)
+
+    r = _gh_put(f"/repos/{GITHUB_REPO}/contents/{repo_path}", payload)
+    if r.status_code in (200, 201):
+        return True, ("updated" if r.status_code == 200 else "created")
+    # simple retry for race (optional: could re-fetch sha once)
+    if r.status_code in (409, 422) and not sha:
+        # try again by fetching sha
+        existing_text, sha2, err2 = _read_file_and_sha(repo_path, ref=GITHUB_BRANCH)
+        if err2:
+            return False, err2
+        payload["sha"] = sha2
+        r2 = _gh_put(f"/repos/{GITHUB_REPO}/contents/{repo_path}", payload)
+        if r2.status_code in (200, 201):
+            return True, ("updated" if r2.status_code == 200 else "created")
+        return False, f"PUT retry failed: {r2.status_code} {r2.text}"
+    return False, f"PUT failed: {r.status_code} {r.text}"
 
 
 # ─────────────────────────────────────────────────────────
-# Branch / PR / Issues
+# tools.yaml upsert (append or update, never wipe)
 # ─────────────────────────────────────────────────────────
-def create_branch(branch_name: str, from_branch: str = GITHUB_BRANCH) -> Tuple[bool, str, Optional[str]]:
-    base = gh_get(f"/repos/{GITHUB_REPO}/git/ref/heads/{from_branch}")
-    if base.status_code != 200:
-        return False, f"Could not read base branch {from_branch}", None
-    sha = base.json()["object"]["sha"]
-
-    r = gh_post(f"/repos/{GITHUB_REPO}/git/refs", {"ref": f"refs/heads/{branch_name}", "sha": sha})
-    if r.status_code == 201:
-        return True, "created", sha
-    if r.status_code == 422 and "Reference already exists" in r.text:
-        return True, "exists", sha
-    return False, f"Branch create failed: {r.status_code} {r.text}", None
-
-
-def open_issue(title: str, body: str):
-    return gh_post(f"/repos/{GITHUB_REPO}/issues", {"title": title, "body": body})
-
-
-def open_pr(title: str, head_branch: str, base_branch: str = GITHUB_BRANCH, body: str = ""):
-    return gh_post(
-        f"/repos/{GITHUB_REPO}/pulls",
-        {"title": title, "head": head_branch, "base": base_branch, "body": body},
-    )
-
-
-# ─────────────────────────────────────────────────────────
-# YAML read/update
-# ─────────────────────────────────────────────────────────
-def fetch_yaml_from_main(path="tools.yaml"):
-    r = gh_content_get(path, ref=GITHUB_BRANCH)
-    if r.status_code != 200:
-        return None, None, f"Could not read {path}: {r.status_code}"
-    data = r.json()
-    content = base64.b64decode(data["content"]).decode("utf-8")
-    sha = data["sha"]
-    try:
-        y = yaml.safe_load(content) or {}
-    except Exception as e:
-        return None, None, f"YAML parse error: {e}"
-    return y, sha, None
-
-
-def ensure_tools_entry(ydata: dict, key: str, label: str):
-    ydata = ydata or {}
-    tools = ydata.get("tools", [])
-    if not any(isinstance(t, dict) and t.get("key") == key for t in tools):
-        tools.append({"key": key, "label": label, "module": f"tools.{key}"})
-    ydata["tools"] = tools
-    return ydata
-
-
-# ─────────────────────────────────────────────────────────
-# Code generation (safe)
-# ─────────────────────────────────────────────────────────
-def generate_tool_py(key: str, label: str, description: str) -> str:
+def upsert_tool_in_tools_yaml(tool_key: str, label: str, module_path: str) -> tuple[bool, str]:
     """
-    Build a minimal Streamlit tool with safely escaped strings.
+    Reads tools.yaml, merges/updates the entry for tool_key, and writes back using sha
+    so existing entries remain intact. Returns (ok, message).
     """
-    label_lit = py_str(label or "New Tool")
-    desc_lit = py_str(description or "New tool created by the Tool Builder.")
-    form_key_lit = py_str(f"{key}_form")
+    if not (GITHUB_TOKEN and GITHUB_REPO):
+        return False, "Missing GITHUB_TOKEN or GITHUB_REPO."
 
+    current_text, sha, err = _read_file_and_sha("tools.yaml", ref=GITHUB_BRANCH)
+    if err:
+        return False, err
+
+    if current_text is None:
+        data = {"tools": []}
+    else:
+        try:
+            data = yaml.safe_load(current_text) or {}
+        except Exception as e:
+            return False, f"YAML parse error: {e}"
+
+    tools = data.get("tools", [])
+    found = False
+    for t in tools:
+        if isinstance(t, dict) and t.get("key") == tool_key:
+            t["label"] = label
+            t["module"] = module_path
+            found = True
+            break
+    if not found:
+        tools.append({"key": tool_key, "label": label, "module": module_path})
+
+    data["tools"] = tools
+    new_yaml = yaml.safe_dump(data, sort_keys=False, default_flow_style=False).rstrip() + "\n"
+
+    payload = {
+        "message": f"chore(builder): upsert tool '{tool_key}' into tools.yaml",
+        "content": _b64(new_yaml),
+        "branch": GITHUB_BRANCH,
+    }
+    if sha:
+        payload["sha"] = sha
+
+    r = _gh_put(f"/repos/{GITHUB_REPO}/contents/tools.yaml", payload)
+    if r.status_code in (200, 201):
+        return True, ("updated tools.yaml" if r.status_code == 200 else "created tools.yaml")
+    return False, f"GitHub write failed: {r.status_code} {r.text}"
+
+
+# ─────────────────────────────────────────────────────────
+# Tool file scaffold
+# ─────────────────────────────────────────────────────────
+def make_tool_scaffold(tool_key: str, tool_label: str, description: str) -> str:
+    """
+    Minimal, clean Streamlit tool scaffold with a single form.
+    """
+    safe_desc = (description or "New tool created by the Tool Builder.").replace('"', '\\"')
     return f'''import streamlit as st
 
 def render():
-    st.header("🧩 " + {label_lit})
-    st.write({desc_lit})
+    st.header("🧩 {tool_label}")
+    st.write("{safe_desc}")
 
-    with st.form({form_key_lit}, clear_on_submit=False):
+    with st.form("{tool_key}_form", clear_on_submit=False):
         example = st.text_input("Example input", value="")
         submitted = st.form_submit_button("Run")
 
     if submitted:
-        st.success("✅ " + {label_lit} + " ran! You typed: " + str(example))
+        st.success(f"✅ {tool_label} ran! You typed: {{example}}")
 '''
 
 
-def format_issue_body(spec_path: str, brief: dict) -> str:
-    nice = json.dumps(brief, indent=2)
-    return f"""### Tool Spec
+# ─────────────────────────────────────────────────────────
+# UI
+# ─────────────────────────────────────────────────────────
+def render():
+    st.title("🛠️ Tool Builder")
+    st.caption("Create or update a tool module in GitHub and auto-register it in tools.yaml (append/update, no duplicates).")
 
-Spec file: `{spec_path}`
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        st.error("Missing `GITHUB_TOKEN` or `GITHUB_REPO` in Streamlit secrets. Please add them in Streamlit Cloud → App → Settings → Secrets.")
+        return
 
-```json
-{nice}
+    with st.form("builder_form", clear_on_submit=False):
+        tool_key   = st.text_input("Tool key (e.g. invoice_gen, bar_tools)", value="")
+        tool_label = st.text_input("Tool label (e.g. Invoice Generator)", value="")
+        description = st.text_area("Short description (what the tool should do)", value="", height=90)
+        submitted = st.form_submit_button("Generate / Update tool")
+
+    if not submitted:
+        return
+
+    # Basic validation
+    slug = tool_key.strip().lower().replace("-", "_")
+    slug = "".join(ch for ch in slug if ch.isalnum() or ch == "_").strip("_")
+    if not slug:
+        st.error("Please provide a valid tool key.")
+        return
+    if not tool_label.strip():
+        st.error("Please provide a tool label.")
+        return
+
+    module_path = f"tools.{slug}"
+    repo_path   = f"streamlit_app/tools/{slug}.py"
+
+    code = make_tool_scaffold(slug, tool_label.strip(), description.strip())
+    commit_msg = f"feat(builder): add/update tool '{slug}' module"
+
+    with st.spinner("Creating/updating tool file in GitHub…"):
+        ok, msg = _create_or_update_file(repo_path, code, commit_msg)
+    if ok:
+        st.success(f"✅ {repo_path} {msg}.")
+        st.code(code, language="python")
+    else:
+        st.error(f"❌ Could not write {repo_path}: {msg}")
+        return
+
+    with st.spinner("Registering tool in tools.yaml…"):
+        ok2, msg2 = upsert_tool_in_tools_yaml(slug, tool_label.strip(), module_path)
+    if ok2:
+        st.success(f"✅ {msg2}")
+        st.info("Tip: Use the sidebar to select the new tool. If you don't see it, click 'Rerun' in the app menu.")
+    else:
+        st.warning(f"⚠️ tools.yaml update issue: {msg2}")
 
