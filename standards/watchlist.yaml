@@ -1,0 +1,26 @@
+# List every document you want to watch.
+# For each doc, the URL will be taken in this order:
+# 1) A repo secret named in `secret`
+# 2) The `url` value here (if provided)
+# 3) A fallback text file standards/urls/<key>.txt (optional)
+
+docs:
+  - key: iso22000
+    name: ISO 22000 (Food Safety Management)
+    url: ""                       # leave empty if you'll use the secret
+    secret: DOC_ISO22000_URL
+
+  - key: haccp
+    name: Codex HACCP — General Principles
+    url: ""                       # or put a public URL
+    secret: DOC_HACCP_URL
+
+  - key: local_reg
+    name: Local/National Food Safety Regulation
+    url: ""                       # your government portal link
+    secret: DOC_LOCAL_REG_URL
+
+  - key: sop_index
+    name: Company SOP Index (SharePoint/Drive)
+    url: ""                       # public/published link, or leave blank for secret
+    secret: DOC_SOP_INDEX_URL
