@@ -8,13 +8,16 @@ from typing import Dict, List, Optional
 import streamlit as st
 import yaml
 
-APP_ROOT = Path(__file__).resolve().parents[1]           # streamlit_app/
-REPO_ROOT = APP_ROOT.parent                               # repo root
+# ───────────────────────── Paths ─────────────────────────
+APP_ROOT = Path(__file__).resolve().parents[1]     # streamlit_app/
+REPO_ROOT = APP_ROOT.parent                         # repo root
 STANDARDS_DIR = REPO_ROOT / "standards"
-WATCHLIST = STANDARDS_DIR / "watchlist.yaml"
-REG_STATE = STANDARDS_DIR / "reg_state.json"
-WATCH_LOG = STANDARDS_DIR / "watch_log.md"
-DEPT_CFG = STANDARDS_DIR / "departments.yaml"
+
+WATCHLIST   = STANDARDS_DIR / "watchlist.yaml"
+REG_STATE   = STANDARDS_DIR / "reg_state.json"
+WATCH_LOG   = STANDARDS_DIR / "watch_log.md"
+DEPT_CFG    = STANDARDS_DIR / "departments.yaml"
+LOC_YAML    = STANDARDS_DIR / "locations.yaml"     # <— NEW: Step 2
 
 SECRETS_HINT = [
     "DOC_ISO22000_URL",
@@ -23,8 +26,7 @@ SECRETS_HINT = [
     "DOC_SOP_INDEX_URL",
 ]
 
-# ---------- helpers ----------
-
+# ─────────────────────── Helpers ────────────────────────
 def read_yaml(p: Path) -> Optional[dict]:
     try:
         if not p.exists(): return None
@@ -62,23 +64,42 @@ def zip_files(files: List[Path]) -> bytes:
     buf.seek(0)
     return buf.read()
 
-# ---------- UI blocks ----------
+def load_locations_yaml() -> dict:
+    """Step 2: read standards/locations.yaml (fallback after secrets)."""
+    try:
+        return yaml.safe_load(LOC_YAML.read_text(encoding="utf-8")) if LOC_YAML.exists() else {}
+    except Exception:
+        return {}
 
+# ─────────────────────── UI Blocks ──────────────────────
 def ui_quick_access():
+    """Quick links resolve in priority: Secrets → locations.yaml (Step 2)."""
+    locs = load_locations_yaml()
+
+    iso   = st.secrets.get("DOC_ISO22000_URL") or locs.get("DOC_ISO22000_URL", "")
+    haccp = st.secrets.get("DOC_HACCP_URL")    or locs.get("DOC_HACCP_URL", "")
+    local = st.secrets.get("DOC_LOCAL_REG_URL") or locs.get("DOC_LOCAL_REG_URL", "")
+    sopix = st.secrets.get("DOC_SOP_INDEX_URL") or locs.get("DOC_SOP_INDEX_URL", "")
+
     with st.expander("Quick access — Documents & SOPs", expanded=False):
         col1, col2, col3 = st.columns(3)
+
         with col1:
             st.write("📄 **ISO 22000**")
-            st.caption("Set a public URL in `watchlist.yaml` or a secret `DOC_ISO22000_URL`.")
-            if has_secret("DOC_ISO22000_URL"): st.success("Secret available")
+            if iso: st.link_button("Open", iso)
+            st.caption("Source: Secret or locations.yaml")
         with col2:
             st.write("📄 **HACCP**")
-            st.caption("Set a public URL in `watchlist.yaml` or a secret `DOC_HACCP_URL`.")
-            if has_secret("DOC_HACCP_URL"): st.success("Secret available")
+            if haccp: st.link_button("Open", haccp)
+            st.caption("Source: Secret or locations.yaml")
         with col3:
-            st.write("🏛️ **Local/State Regulation**")
-            st.caption("Set a public URL in `watchlist.yaml` or a secret `DOC_LOCAL_REG_URL`.")
-            if has_secret("DOC_LOCAL_REG_URL"): st.success("Secret available")
+            st.write("🏛️ **Local Regulation**")
+            if local: st.link_button("Open", local)
+            st.caption("Source: Secret or locations.yaml")
+
+        st.write("🗂️ **Company SOP Index**")
+        if sopix: st.link_button("Open SOP Index", sopix)
+        st.caption("Use Home → Set Document Locations to configure if secrets not set.")
 
 def ui_reg_watch():
     st.subheader("🔬 Regulatory Watch")
@@ -171,11 +192,9 @@ def ui_production_packet():
     sop_dir_abs = (REPO_ROOT / sop_dir_rel).resolve() if sop_dir_rel else None
 
     files: List[Path] = []
-    # match patterns under SOP dir
     if sop_dir_abs and sop_dir_abs.exists():
         for patt in patts:
             files.extend(sop_dir_abs.rglob(patt))
-    # add extra paths
     for ep in extras:
         for p in (REPO_ROOT / ep).parent.rglob(Path(ep).name):
             if p.is_file(): files.append(p)
@@ -191,9 +210,10 @@ def ui_production_packet():
     else:
         st.info("No matching files yet. Add SOP/PRP files to the department folder or define extra_paths.")
 
+# ─────────────────────── Page entry ─────────────────────
 def render():
     st.title("Milky Roads AI — Food Safety")
-    ui_quick_access()
+    ui_quick_access()      # Step 2: reads Secrets → locations.yaml
     st.divider()
     ui_reg_watch()
     st.divider()
