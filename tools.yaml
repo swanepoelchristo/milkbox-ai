@@ -31,3 +31,6 @@ tools:
     label: International CV Builder (Pro)
     module: tools.cv_builder_pro
 
+  - key: builder
+    label: Tool Builder
+    module: tools.builder
