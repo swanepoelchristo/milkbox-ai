@@ -1,0 +1,49 @@
+name: Repo Factory
+
+on:
+  workflow_dispatch:
+    inputs:
+      new_owner:
+        description: "New repo owner (leave blank for current owner)"
+        default: ""
+        required: false
+      new_repo:
+        description: "New repo name"
+        required: true
+      template_owner:
+        description: "Template owner (e.g. swanepoelchristo)"
+        required: true
+      template_repo:
+        description: "Template repo (must be a GitHub Template repo)"
+        required: true
+
+jobs:
+  make:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+      administration: write
+      issues: write
+
+    steps:
+      - name: Use repo factory
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.ADMIN_TOKEN }}
+          script: |
+            const owner = core.getInput('new_owner') || context.repo.owner;
+            const name  = core.getInput('new_repo');
+            const tOw   = core.getInput('template_owner');
+            const tRp   = core.getInput('template_repo');
+
+            core.info(`Creating ${owner}/${name} from ${tOw}/${tRp}...`);
+            await github.rest.repos.createUsingTemplate({
+              template_owner: tOw,
+              template_repo: tRp,
+              owner,
+              name,
+              include_all_branches: false,
+              private: false
+            });
+            core.info('Done ✅');
