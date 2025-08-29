@@ -1,9 +1,11 @@
-import importlib
+# --- Ensure "tools.*" imports resolve ---
+import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
 
-import streamlit as st
-import yaml
+APP_ROOT = Path(__file__).resolve().parent  # .../streamlit_app
+if str(APP_ROOT) not in sys.path:
+    sys.path.insert(0, str(APP_ROOT))
+# ----------------------------------------
 
 # ─────────────────────────────────────────────────────────
 # Config
