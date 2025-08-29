@@ -2,7 +2,7 @@ name: SOP Watch
 
 on:
   schedule:
-    - cron: "15 2 * * *"   # run nightly 02:15 UTC
+    - cron: "15 2 * * *"   # nightly 02:15 UTC
   workflow_dispatch: {}
 
 jobs:
