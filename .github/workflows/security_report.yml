@@ -1,0 +1,44 @@
+name: Nightly Security Report
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  security-events: read
+
+jobs:
+  security-report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Summarize Dependabot / Code scanning
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo  = context.repo.repo;
+
+            const dep = await github.rest.pulls.list({
+              owner, repo, state: 'open', per_page: 100
+            });
+            const dependabotPRs = dep.data.filter(pr =>
+              (pr.user && pr.user.login === 'dependabot[bot]'));
+
+            if (dependabotPRs.length === 0) {
+              core.info('No open Dependabot PRs. Nothing to report.');
+              return;
+            }
+
+            const lines = dependabotPRs.map(pr => `- ${pr.title} (#${pr.number})`).join('\n');
+            const title = `Nightly Security Report: ${dependabotPRs.length} Dependabot PR(s)`;
+
+            await github.rest.issues.create({
+              owner, repo,
+              title,
+              body: `Automated summary:\n\n${lines}\n\n_Opened by Nightly Security Report bot._`
+            });
+            core.info('Issue created ✅');
