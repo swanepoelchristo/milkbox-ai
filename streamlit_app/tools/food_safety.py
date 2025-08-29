@@ -1,357 +1,417 @@
-import csv
+import hashlib
 import io
+import json
+import time
 from datetime import datetime, date
-from typing import Dict, List, Optional
+from typing import Dict, Any, List, Tuple, Optional
 
+import requests
 import streamlit as st
 
-APP_KEY = "milky_food_safety_state_v1"
 
-# -----------------------------
-# Small helpers
-# -----------------------------
-def _init_state():
-    if APP_KEY not in st.session_state:
-        st.session_state[APP_KEY] = {
-            # Records
-            "temps": [],        # {dt, area, product, reading_c, user, note}
-            "ssop": [],         # {dt, zone, task, pass_fail, user, note}
-            "lots": [],         # {dt, product, lot, supplier, qty, unit, use_by, received_ok, note}
-            "incidents": [],    # {dt, type, product, lot, description, action, user}
+# ─────────────────────────────────────────────────────────
+# Helpers & state
+# ─────────────────────────────────────────────────────────
 
-            # Settings
-            "brand": "Milky Roads AI — Food Safety",
-            "site": "Milky Roads Dairy",
-            "areas": ["Receiving", "Cooler", "Freezer", "Processing", "Shipping", "Hot Hold", "Cold Hold"],
-            "ssop_zones": ["Raw", "RTE", "Packaging", "Utensils", "CIP"],
-            "ssop_tasks": ["Pre-Op Clean", "Mid-Shift Clean", "Post-Op Clean", "Sanitizer Check", "Allergen Clean"],
-
-            # "House with rooms": Departments → SOP links/files
-            # Each dept: { name, description, sop_links: [ {title, url} ] }
-            "departments": [
-                {"name": "Smalls (Artisan Cheeses)", "description": "Fancy cheese room", "sop_links": []},
-                {"name": "Production", "description": "Main production floor", "sop_links": []},
-                {"name": "Packaging", "description": "Primary & secondary packaging", "sop_links": []},
-                {"name": "Warehouse", "description": "Cooler/Freezer storage & shipping", "sop_links": []},
-            ],
-
-            # Regulation watcher
-            # Store the official URL + note + last_checked timestamp
-            "reg_watch": {
-                "document_name": "National Food Safety Regulation",
-                "official_url": "",         # you paste the official link here
-                "note": "We track this URL for amendments.",
-                "last_checked_at": None,    # set when you click "Check now"
-                "last_seen_hash": None,     # reserved if we later do hashing
-            },
-        }
+def _now_iso() -> str:
+    return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _csv_bytes(rows: List[Dict], header: List[str]) -> bytes:
+def _hash_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _hash_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _download_csv(filename: str, rows: List[Dict[str, Any]]):
+    # Build CSV in-memory (no pandas dependency)
+    if not rows:
+        st.info("Nothing to export yet.")
+        return
+    headers = list(rows[0].keys())
     buf = io.StringIO()
-    writer = csv.DictWriter(buf, fieldnames=header)
-    writer.writeheader()
+    buf.write(",".join(headers) + "\n")
     for r in rows:
-        writer.writerow(r)
-    return buf.getvalue().encode("utf-8")
+        line = []
+        for h in headers:
+            v = r.get(h, "")
+            # Escape commas and quotes
+            if isinstance(v, (dict, list)):
+                v = json.dumps(v)
+            s = str(v).replace('"', '""')
+            if "," in s or '"' in s or "\n" in s:
+                s = f'"{s}"'
+            line.append(s)
+        buf.write(",".join(line) + "\n")
+    st.download_button("Download CSV", buf.getvalue().encode("utf-8"), file_name=filename, mime="text/csv")
 
 
-def _section_title(title: str, emoji: str = ""):
-    if emoji:
-        st.subheader(f"{emoji} {title}")
-    else:
-        st.subheader(title)
+def _download_json(filename: str, data: Any):
+    st.download_button("Download JSON", json.dumps(data, indent=2).encode("utf-8"),
+                       file_name=filename, mime="application/json")
 
 
-# -----------------------------
-# Tabs
-# -----------------------------
-def _tab_temperatures(S: Dict):
-    _section_title("Temperature Logs", "🌡️")
-    with st.form("temp_form", clear_on_submit=True):
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            dt = st.datetime_input("Date & time", datetime.now())
-            area = st.selectbox("Area", options=S["areas"])
-        with c2:
-            product = st.text_input("Product / Item", placeholder="e.g. Milk")
-            reading = st.number_input("Reading (°C)", value=4.0, step=0.1, format="%.1f")
-        with c3:
-            user = st.text_input("User / Initials", placeholder="AB")
-            note = st.text_input("Note", placeholder="(optional)")
-        submitted = st.form_submit_button("Add temperature")
-    if submitted:
-        S["temps"].append({
-            "dt": dt.isoformat(timespec="minutes"),
-            "area": area,
-            "product": product.strip(),
-            "reading_c": reading,
-            "user": user.strip(),
-            "note": note.strip(),
-        })
-        st.success("Temperature added.")
+def _init_state():
+    ss = st.session_state
+    ss.setdefault("fs_temperatures", [])   # list of dicts
+    ss.setdefault("fs_sanitation", [])     # list of completed sanitation entries
+    ss.setdefault("fs_sanitation_tasks", [
+        {"name": "Clean vats", "freq": "Daily"},
+        {"name": "Sanitize knives", "freq": "Daily"},
+        {"name": "Deep clean aging room", "freq": "Weekly"},
+    ])
+    ss.setdefault("fs_lots", [])           # list of dicts
+    ss.setdefault("fs_incidents", [])      # list of dicts
+    ss.setdefault("fs_depts", {            # house → rooms → drawers (SOPs)
+        "Milk Intake": {"SOPs": []},
+        "Production (Cook/Cut/Press)": {"SOPs": []},
+        "Aging Rooms": {"SOPs": []},
+        "Packaging": {"SOPs": []},
+        "Dispatch": {"SOPs": []},
+        "Lab": {"SOPs": []},
+    })
+    ss.setdefault("fs_reg_watch", {
+        "mode": "url",       # "url" or "file"
+        "url": "",
+        "last_etag": "",
+        "last_modified": "",
+        "last_hash": "",     # for uploaded file content hash
+        "last_check": "",
+    })
+
+
+# ─────────────────────────────────────────────────────────
+# Sections
+# ─────────────────────────────────────────────────────────
+
+def home_ui():
+    st.subheader("Milky Roads AI — Food Safety (Home)")
+    st.write(
+        "This tool organizes **temperature logs**, **sanitation (SSOP)**, **lots/traceability**, "
+        "**incidents/CAPA**, and a **Food Safety House** where each department has an SOP drawer. "
+        "Use the sidebar to open a section."
+    )
+    st.info(
+        "Tip: everything is stored in your session while you work. Use **Export** to download CSV/JSON "
+        "for your records or to import elsewhere."
+    )
+
+
+def temperatures_ui():
+    st.subheader("Temperature Logs")
+    with st.form("temp_form", clear_on_submit=False):
+        col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
+        dt = col1.date_input("Date", date.today())
+        tm = col2.time_input("Time", datetime.now().time())
+        probe = col3.text_input("Probe/Sensor ID", "Probe-1")
+        loc = col4.text_input("Location/Unit", "Milk vat")
+
+        col5, col6 = st.columns([1, 1])
+        temp_c = col5.number_input("Temperature (°C)", value=4.0, step=0.1)
+        operator = col6.text_input("Operator", "")
+
+        notes = st.text_area("Notes", "")
+        submitted = st.form_submit_button("Add record")
+        if submitted:
+            st.session_state.fs_temperatures.append({
+                "timestamp": f"{dt} {tm}",
+                "probe": probe,
+                "location": loc,
+                "temp_c": temp_c,
+                "operator": operator,
+                "notes": notes
+            })
+            st.success("Temperature record added.")
 
     st.divider()
-    st.caption("Today’s temperatures")
-    todays = [r for r in S["temps"] if r["dt"].startswith(date.today().isoformat())]
-    if todays:
-        st.dataframe(todays, use_container_width=True, hide_index=True)
+    st.write("#### Latest records")
+    rows = st.session_state.fs_temperatures[-50:][::-1]
+    if rows:
+        st.table(rows)
+        _download_csv("temperatures.csv", rows)
     else:
-        st.info("No temperatures recorded today.")
+        st.info("No temperature records yet.")
 
 
-def _tab_sanitation(S: Dict):
-    _section_title("Sanitation (SSOP)", "🧽")
+def sanitation_ui():
+    st.subheader("SSOP / Sanitation")
+
+    with st.expander("Configure tasks (admin)", expanded=False):
+        st.caption("Add or remove routine SSOP tasks that appear below.")
+        tname = st.text_input("New task name", "")
+        tfreq = st.selectbox("Frequency", ["Daily", "Weekly", "Monthly"], index=0)
+        add_task = st.button("Add task")
+        if add_task and tname.strip():
+            st.session_state.fs_sanitation_tasks.append({"name": tname.strip(), "freq": tfreq})
+            st.success("Task added.")
+        if st.session_state.fs_sanitation_tasks:
+            st.write("Current tasks")
+            st.table(st.session_state.fs_sanitation_tasks)
+
+    st.write("#### Perform SSOP")
     with st.form("ssop_form", clear_on_submit=True):
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            dt = st.datetime_input("Date & time", datetime.now(), key="ssop_dt")
-            zone = st.selectbox("Zone", options=S["ssop_zones"])
-        with c2:
-            task = st.selectbox("Task", options=S["ssop_tasks"])
-            result = st.selectbox("Result", options=["Pass", "Fail"])
-        with c3:
-            user = st.text_input("User / Initials", placeholder="AB", key="ssop_user")
-            note = st.text_input("Note", placeholder="(optional)", key="ssop_note")
-        submitted = st.form_submit_button("Add sanitation record")
-    if submitted:
-        S["ssop"].append({
-            "dt": dt.isoformat(timespec="minutes"),
-            "zone": zone,
-            "task": task,
-            "pass_fail": result,
-            "user": user.strip(),
-            "note": note.strip(),
-        })
-        st.success("Sanitation record added.")
+        the_date = st.date_input("Date", date.today())
+        the_time = st.time_input("Time", datetime.now().time())
+        operator = st.text_input("Operator", "")
+        chem = st.text_input("Chemical(s) Used", "")
+        completed = []
+        for task in st.session_state.fs_sanitation_tasks:
+            done = st.checkbox(f"{task['name']} ({task['freq']})", value=False)
+            if done:
+                completed.append(task["name"])
+        notes = st.text_area("Notes", "")
+        sub = st.form_submit_button("Save sanitation record")
+        if sub:
+            st.session_state.fs_sanitation.append({
+                "timestamp": f"{the_date} {the_time}",
+                "operator": operator,
+                "chemicals": chem,
+                "completed": completed,
+                "notes": notes
+            })
+            st.success("Sanitation record saved.")
 
     st.divider()
-    st.caption("Recent sanitation checks")
-    if S["ssop"]:
-        st.dataframe(S["ssop"][-50:], use_container_width=True, hide_index=True)
+    st.write("#### Latest sanitation")
+    rows = st.session_state.fs_sanitation[-50:][::-1]
+    if rows:
+        st.table(rows)
+        _download_csv("sanitation.csv", rows)
     else:
         st.info("No sanitation records yet.")
 
 
-def _tab_lots(S: Dict):
-    _section_title("Lots & Traceability", "🏷️")
+def lots_ui():
+    st.subheader("Lots & Traceability")
+
     with st.form("lot_form", clear_on_submit=True):
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            dt = st.date_input("Date", value=date.today(), key="lot_dt")
-            product = st.text_input("Product", placeholder="e.g. Mozzarella")
-        with c2:
-            lot = st.text_input("Lot / Batch", placeholder="LOT-12345")
-            supplier = st.text_input("Supplier", placeholder="DairyCo")
-        with c3:
-            qty = st.number_input("Quantity", min_value=0.0, value=100.0, step=1.0)
-            unit = st.text_input("Unit", value="kg")
-        c4, c5 = st.columns(2)
-        with c4:
-            use_by = st.date_input("Use by / Expiry", value=date.today())
-        with c5:
-            received_ok = st.selectbox("Receiving check", options=["OK", "Hold", "Reject"], index=0)
-        note = st.text_input("Note", placeholder="(optional)")
-        submitted = st.form_submit_button("Add lot")
-    if submitted:
-        S["lots"].append({
-            "dt": dt.isoformat(),
-            "product": product.strip(),
-            "lot": lot.strip(),
-            "supplier": supplier.strip(),
-            "qty": qty,
-            "unit": unit.strip(),
-            "use_by": use_by.isoformat(),
-            "received_ok": received_ok,
-            "note": note.strip(),
-        })
-        st.success("Lot added.")
+        lot_id = st.text_input("Lot ID", "")
+        product = st.text_input("Product", "Cheese (specify)")
+        mfg_date = st.date_input("Manufacture Date", date.today())
+        suppliers = st.text_input("Supplier / Farm codes (comma-separated)", "")
+        ingredients = st.text_area("Ingredients (one per line)", "Milk\nCulture\nRennet\nSalt")
+        qty = st.text_input("Quantity / Pack info", "")
+        sub = st.form_submit_button("Add lot")
+        if sub and lot_id.strip():
+            st.session_state.fs_lots.append({
+                "lot_id": lot_id.strip(),
+                "product": product,
+                "mfg_date": str(mfg_date),
+                "suppliers": [s.strip() for s in suppliers.split(",") if s.strip()],
+                "ingredients": [i.strip() for i in ingredients.splitlines() if i.strip()],
+                "qty": qty
+            })
+            st.success("Lot saved.")
 
     st.divider()
-    st.caption("Recent lots")
-    if S["lots"]:
-        st.dataframe(S["lots"][-100:], use_container_width=True, hide_index=True)
+    st.write("#### Lots")
+    rows = st.session_state.fs_lots[-100:][::-1]
+    if rows:
+        st.table(rows)
+        _download_csv("lots.csv", rows)
     else:
-        st.info("No lots recorded yet.")
+        st.info("No lots yet.")
 
 
-def _tab_incidents(S: Dict):
-    _section_title("Incidents / Recall", "⚠️")
-    with st.form("inc_form", clear_on_submit=True):
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            dt = st.datetime_input("Date & time", datetime.now(), key="inc_dt")
-            type_ = st.selectbox("Type", options=["Deviation", "Customer Complaint", "Recall", "Other"])
-        with c2:
-            product = st.text_input("Product", placeholder="(optional)")
-            lot = st.text_input("Lot / Batch", placeholder="(optional)")
-        with c3:
-            user = st.text_input("User / Initials", placeholder="AB", key="inc_user")
-        description = st.text_area("Description / Findings")
-        action = st.text_area("Corrective action")
-        submitted = st.form_submit_button("Add incident")
-    if submitted:
-        S["incidents"].append({
-            "dt": dt.isoformat(timespec="minutes"),
-            "type": type_,
-            "product": product.strip(),
-            "lot": lot.strip(),
-            "description": description.strip(),
-            "action": action.strip(),
-            "user": user.strip(),
-        })
-        st.success("Incident added.")
+def incidents_ui():
+    st.subheader("Incidents / CAPA")
+
+    with st.form("incident_form", clear_on_submit=True):
+        i_date = st.date_input("Date", date.today())
+        i_time = st.time_input("Time", datetime.now().time())
+        severity = st.selectbox("Severity", ["Low", "Medium", "High", "Critical"])
+        area = st.text_input("Area/Dept", "")
+        description = st.text_area("Incident Description", "")
+        root = st.text_area("Root Cause (if known)", "")
+        action = st.text_area("Corrective Action", "")
+        proof = st.file_uploader("Attach evidence (optional)", accept_multiple_files=True)
+        submit = st.form_submit_button("Save incident")
+        if submit:
+            files_meta = []
+            if proof:
+                for f in proof:
+                    files_meta.append({"name": f.name, "size": f.size})
+            st.session_state.fs_incidents.append({
+                "timestamp": f"{i_date} {i_time}",
+                "severity": severity,
+                "area": area,
+                "description": description,
+                "root_cause": root,
+                "action": action,
+                "attachments": files_meta
+            })
+            st.success("Incident saved.")
 
     st.divider()
-    st.caption("Recent incidents")
-    if S["incidents"]:
-        st.dataframe(S["incidents"][-50:], use_container_width=True, hide_index=True)
+    st.write("#### Incidents")
+    rows = st.session_state.fs_incidents[-100:][::-1]
+    if rows:
+        st.table(rows)
+        _download_csv("incidents.csv", rows)
     else:
-        st.info("No incidents recorded yet.")
+        st.info("No incidents yet.")
 
 
-def _tab_export(S: Dict):
-    _section_title("Export CSVs", "📤")
-    col1, col2 = st.columns(2)
-    with col1:
-        st.write("Temperature Logs")
-        tmp_hdr = ["dt", "area", "product", "reading_c", "user", "note"]
-        st.download_button(
-            "Download temperatures (CSV)",
-            data=_csv_bytes(S["temps"], tmp_hdr),
-            file_name=f"milkyroads_temps_{date.today()}.csv",
-            mime="text/csv",
-        )
-        st.write("Sanitation (SSOP)")
-        ssop_hdr = ["dt", "zone", "task", "pass_fail", "user", "note"]
-        st.download_button(
-            "Download sanitation (CSV)",
-            data=_csv_bytes(S["ssop"], ssop_hdr),
-            file_name=f"milkyroads_sanitation_{date.today()}.csv",
-            mime="text/csv",
-        )
-    with col2:
-        st.write("Lots & Traceability")
-        lot_hdr = ["dt", "product", "lot", "supplier", "qty", "unit", "use_by", "received_ok", "note"]
-        st.download_button(
-            "Download lots (CSV)",
-            data=_csv_bytes(S["lots"], lot_hdr),
-            file_name=f"milkyroads_lots_{date.today()}.csv",
-            mime="text/csv",
-        )
-        st.write("Incidents / Recall")
-        inc_hdr = ["dt", "type", "product", "lot", "description", "action", "user"]
-        st.download_button(
-            "Download incidents (CSV)",
-            data=_csv_bytes(S["incidents"], inc_hdr),
-            file_name=f"milkyroads_incidents_{date.today()}.csv",
-            mime="text/csv",
-        )
-    st.caption("Tip: For long-term storage, we can add a Google Sheet or DB later.")
+def house_ui():
+    st.subheader("Food Safety House — Departments & SOP drawers")
+    st.caption("Each department has a drawer where you can drop SOPs or a link to a folder.")
 
+    # Add/rename departments
+    with st.expander("Manage departments", expanded=False):
+        new_dept = st.text_input("Add a department", "")
+        add = st.button("Add department")
+        if add and new_dept.strip():
+            st.session_state.fs_depts.setdefault(new_dept.strip(), {"SOPs": []})
+            st.success("Department added.")
 
-def _tab_settings(S: Dict):
-    _section_title("Settings — House, Rooms & Watcher", "⚙️")
+    # Show depts
+    for dept_name, meta in st.session_state.fs_depts.items():
+        with st.expander(f"🏢 {dept_name}", expanded=False):
+            st.write("**SOP Drawer**")
+            col1, col2 = st.columns([1, 1])
+            # upload SOP
+            up = col1.file_uploader(f"Upload SOP for {dept_name}", key=f"sop_upload_{dept_name}")
+            link = col2.text_input(f"or link a folder/drive URL", key=f"sop_link_{dept_name}")
+            add_sop = st.button(f"Attach to {dept_name}", key=f"attach_{dept_name}")
+            if add_sop:
+                entry = {"added_at": _now_iso()}
+                if up is not None:
+                    content = up.read()
+                    entry.update({
+                        "type": "file",
+                        "name": up.name,
+                        "size": len(content),
+                        "sha256": _hash_bytes(content)
+                    })
+                elif link.strip():
+                    entry.update({
+                        "type": "link",
+                        "url": link.strip()
+                    })
+                else:
+                    st.warning("Please upload a file or paste a link.")
+                    st.stop()
+                meta["SOPs"].append(entry)
+                st.success("Attached.")
 
-    # Branding & site
-    st.markdown("### Branding")
-    S["brand"] = st.text_input("App title", value=S["brand"])
-    S["site"] = st.text_input("Site / Facility name", value=S["site"])
-
-    st.markdown("---")
-    st.markdown("### Areas & Sanitation lists")
-    col1, col2 = st.columns(2)
-    with col1:
-        st.write("**Temperature Areas** (comma-separated)")
-        areas = st.text_area("Areas", value=", ".join(S["areas"]))
-        if st.button("Save areas"):
-            S["areas"] = [a.strip() for a in areas.split(",") if a.strip()]
-            st.success("Areas saved.")
-    with col2:
-        st.write("**SSOP Zones** (comma-separated)")
-        zones = st.text_area("Zones", value=", ".join(S["ssop_zones"]), key="zones")
-        st.write("**SSOP Tasks** (comma-separated)")
-        tasks = st.text_area("Tasks", value=", ".join(S["ssop_tasks"]), key="tasks")
-        if st.button("Save SSOP lists"):
-            S["ssop_zones"] = [z.strip() for z in zones.split(",") if z.strip()]
-            S["ssop_tasks"] = [t.strip() for t in tasks.split(",") if t.strip()]
-            st.success("SSOP lists saved.")
-
-    # Departments (House → Rooms)
-    st.markdown("---")
-    st.markdown("### Departments & SOP drawers (House → Rooms)")
-    for i, d in enumerate(S["departments"]):
-        with st.expander(f"🏠 {d['name']}", expanded=False):
-            d["name"] = st.text_input("Department name", value=d["name"], key=f"dept_name_{i}")
-            d["description"] = st.text_input("Short description", value=d["description"], key=f"dept_desc_{i}")
-
-            st.write("**SOP links**")
-            # Show existing
-            if d["sop_links"]:
-                for j, link in enumerate(d["sop_links"]):
-                    cols = st.columns([3, 5, 1])
-                    with cols[0]:
-                        link["title"] = st.text_input("Title", value=link["title"], key=f"d{i}_t{j}")
-                    with cols[1]:
-                        link["url"] = st.text_input("URL (Drive/SharePoint/etc.)", value=link["url"], key=f"d{i}_u{j}")
-                    with cols[2]:
-                        if st.button("🗑", key=f"d{i}_del{j}"):
-                            d["sop_links"].pop(j)
-                            st.experimental_rerun()
+            if meta["SOPs"]:
+                st.write("**Current drawer contents**")
+                st.table(meta["SOPs"])
             else:
-                st.caption("No SOPs yet for this department.")
-
-            st.write("**Add new SOP link**")
-            new_t = st.text_input("New SOP title", key=f"d{i}_new_title")
-            new_u = st.text_input("New SOP URL", key=f"d{i}_new_url")
-            if st.button("➕ Add SOP link", key=f"d{i}_add"):
-                if new_t.strip() and new_u.strip():
-                    d["sop_links"].append({"title": new_t.strip(), "url": new_u.strip()})
-                    st.success("SOP link added.")
-                    st.experimental_rerun()
-
-    # Regulation Watcher (paste official URL, "Check now")
-    st.markdown("---")
-    st.markdown("### Regulation Watcher")
-    rw = S["reg_watch"]
-    rw["document_name"] = st.text_input("Document name", value=rw["document_name"])
-    rw["official_url"] = st.text_input("Official source URL (paste the regulator’s link)", value=rw["official_url"])
-    rw["note"] = st.text_input("Note", value=rw["note"])
-
-    cols = st.columns([1, 2])
-    with cols[0]:
-        if st.button("🔎 Check now"):
-            # We don’t change anything; just record a check time.
-            rw["last_checked_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-            st.success("Recorded a check. (For true background monitoring, ask the assistant to set a reminder agent.)")
-    with cols[1]:
-        st.write("**Last checked at:**", rw["last_checked_at"] or "—")
-
-    st.caption("For automatic background checks & alerts, tell the assistant the official URL and how often to check; you’ll be notified here in chat if it changes.")
+                st.info("Drawer empty.")
 
 
-# -----------------------------
-# Main entry
-# -----------------------------
+def regulation_watcher_ui():
+    st.subheader("Regulation Watcher")
+    st.caption("Paste the official guideline URL **or** upload the PDF. Click **Check now** to detect changes. "
+               "We store ETag/Last-Modified (URL) or content hash (file) in your session to compare.")
+
+    mode = st.radio("Source type", ["URL", "Upload"], index=0, horizontal=True)
+    st.session_state.fs_reg_watch["mode"] = "url" if mode == "URL" else "file"
+
+    if mode == "URL":
+        url = st.text_input("Regulation URL", st.session_state.fs_reg_watch.get("url", ""))
+        st.session_state.fs_reg_watch["url"] = url.strip()
+        checked = st.button("Check now")
+        if checked and url.strip():
+            try:
+                r = requests.head(url, timeout=10, allow_redirects=True)
+                etag = r.headers.get("ETag", "")
+                lm = r.headers.get("Last-Modified", "")
+                changed = (etag and etag != st.session_state.fs_reg_watch.get("last_etag")) or \
+                          (lm and lm != st.session_state.fs_reg_watch.get("last_modified"))
+                st.write(f"ETag: `{etag or '—'}`  •  Last-Modified: `{lm or '—'}`")
+                if changed:
+                    st.warning("🔔 Update detected for this URL (ETag/Last-Modified changed).")
+                else:
+                    st.success("No change detected.")
+                st.session_state.fs_reg_watch["last_etag"] = etag
+                st.session_state.fs_reg_watch["last_modified"] = lm
+                st.session_state.fs_reg_watch["last_check"] = _now_iso()
+            except Exception as e:
+                st.error(f"HEAD request failed: {e}")
+
+    else:
+        up = st.file_uploader("Upload the official PDF", type=["pdf"])
+        if up:
+            content = up.read()
+            current_hash = _hash_bytes(content)
+            last_hash = st.session_state.fs_reg_watch.get("last_hash", "")
+            st.write(f"Current SHA256: `{current_hash}`")
+            if last_hash and current_hash != last_hash:
+                st.warning("🔔 File content changed (hash differs).")
+            elif last_hash:
+                st.success("No change detected.")
+            else:
+                st.info("Baseline saved for this file.")
+            st.session_state.fs_reg_watch["last_hash"] = current_hash
+            st.session_state.fs_reg_watch["last_check"] = _now_iso()
+
+    st.divider()
+    st.write("**Watcher status**")
+    st.json(st.session_state.fs_reg_watch)
+
+
+def export_ui():
+    st.subheader("Export Center")
+    st.caption("Download snapshots of your current session data.")
+
+    st.write("**Temperatures**")
+    _download_csv("temperatures.csv", st.session_state.fs_temperatures)
+
+    st.write("**Sanitation**")
+    _download_csv("sanitation.csv", st.session_state.fs_sanitation)
+
+    st.write("**Lots**")
+    _download_csv("lots.csv", st.session_state.fs_lots)
+
+    st.write("**Incidents**")
+    _download_csv("incidents.csv", st.session_state.fs_incidents)
+
+    st.write("**Departments (House) — JSON**")
+    _download_json("departments.json", st.session_state.fs_depts)
+
+
+# ─────────────────────────────────────────────────────────
+# Page
+# ─────────────────────────────────────────────────────────
+
 def render():
+    st.title("Milky Roads AI — Food Safety")
+
     _init_state()
-    S = st.session_state[APP_KEY]
 
-    st.header(S["brand"])
-    st.caption("Temperatures • Sanitation • Traceability • Incidents • Exports • Doc Library • Regulation Watcher")
+    # Local tabs inside the tool
+    tab = st.sidebar.radio(
+        "Sections",
+        [
+            "Home",
+            "Temperatures",
+            "Sanitation (SSOP)",
+            "Lots / Traceability",
+            "Incidents / CAPA",
+            "Departments (House)",
+            "Regulation Watcher",
+            "Export"
+        ],
+        index=0
+    )
 
-    t1, t2, t3, t4, t5, t6 = st.tabs([
-        "🌡️ Temperatures",
-        "🧽 Sanitation",
-        "🏷️ Lots",
-        "⚠️ Incidents",
-        "📤 Export",
-        "⚙️ Settings"
-    ])
-
-    with t1: _tab_temperatures(S)
-    with t2: _tab_sanitation(S)
-    with t3: _tab_lots(S)
-    with t4: _tab_incidents(S)
-    with t5: _tab_export(S)
-    with t6: _tab_settings(S)
+    if tab == "Home":
+        home_ui()
+    elif tab == "Temperatures":
+        temperatures_ui()
+    elif tab == "Sanitation (SSOP)":
+        sanitation_ui()
+    elif tab == "Lots / Traceability":
+        lots_ui()
+    elif tab == "Incidents / CAPA":
+        incidents_ui()
+    elif tab == "Departments (House)":
+        house_ui()
+    elif tab == "Regulation Watcher":
+        regulation_watcher_ui()
+    elif tab == "Export":
+        export_ui()
