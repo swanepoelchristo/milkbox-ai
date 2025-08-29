@@ -1,35 +1,41 @@
 tools:
-- key: hello
-  label: Hello & About
-  module: tools.hello
-- key: notes
-  label: Notes
-  module: tools.notes
-- key: invoice_gen
-  label: Invoice Generator
-  module: tools.invoice_gen
-- key: bar_tools
-  label: Bar Tools (ABV & Tips)
-  module: tools.bar_tools
-- key: cv_builder
-  label: CV Builder
-  module: tools.cv_builder
-- key: demo_2
-  label: Demo Tool 2
-  module: tools.demo_2
-- key: resume
-  label: Resume Builder (legacy)
-  module: tools.resume
-- key: cv_builder_pro
-  label: International CV Builder (Pro)
-  module: tools.cv_builder_pro
-- key: builder
-  label: Tool Builder
-  module: tools.builder
-- key: food_safety
-  label: "Milky Roads AI \u2014 Food Safety"
-  module: tools.food_safety
-tools:
+  - key: hello
+    label: "Hello & About"
+    module: "tools.hello"
+
+  - key: notes
+    label: "Notes"
+    module: "tools.notes"
+
+  - key: invoice_generator
+    label: "Invoice Generator"
+    module: "tools.invoice_gen"
+
+  - key: bar_tools
+    label: "Bar Tools (ABV & Tips)"
+    module: "tools.bar_tools"
+
+  - key: cv_builder
+    label: "CV Builder"
+    module: "tools.cv_builder"
+
+  - key: demo_tool_2
+    label: "Demo Tool 2"
+    module: "tools.demo_2"
+
+  - key: builder
+    label: "Tool Builder"
+    module: "tools.builder"
+
+  - key: resume_legacy
+    label: "Resume Builder (legacy)"
+    module: "tools.resume_py"   # <— if your legacy file is tools/resume.py change this to "tools.resume"
+                                #     (see note below)
+
+  - key: cv_builder_pro
+    label: "International CV Builder (Pro)"
+    module: "tools.cv_builder_pro"   # <— only if you actually created tools/cv_builder_pro.py
+
   - key: food_safety
     label: "Food Safety"
     module: "tools.food_safety"
