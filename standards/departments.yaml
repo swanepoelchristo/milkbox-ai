@@ -1,0 +1,15 @@
+# List the departments/areas your FSMS manages.
+# You can add more later (e.g., "raw_milk", "packing", etc.)
+departments:
+  - key: smalls
+    name: Smalls Department
+    owner: "QA Manager"       # display only
+    inbox_url: ""             # optional SharePoint/Drive folder URL (leave blank if you don't have it yet)
+    sop_dir: "standards/sops/smalls"     # where SOP files live in this repo
+    expected_sops:             # list the canonical SOPs you want to see present
+      - SOP-001 Personal Hygiene
+      - SOP-002 Allergen Control
+      - SOP-003 Equipment Cleaning
+      - SOP-004 Environmental Monitoring
+      - SOP-005 Chilled Storage & Temp Logging
+      - SOP-006 Traceability & Recall
