@@ -1,9 +1,8 @@
 import io
 import json
-import os
 import zipfile
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import streamlit as st
 import yaml
@@ -17,7 +16,7 @@ WATCHLIST   = STANDARDS_DIR / "watchlist.yaml"
 REG_STATE   = STANDARDS_DIR / "reg_state.json"
 WATCH_LOG   = STANDARDS_DIR / "watch_log.md"
 DEPT_CFG    = STANDARDS_DIR / "departments.yaml"
-LOC_YAML    = STANDARDS_DIR / "locations.yaml"     # <— NEW: Step 2
+LOC_YAML    = STANDARDS_DIR / "locations.yaml"     # Step 2
 
 SECRETS_HINT = [
     "DOC_ISO22000_URL",
@@ -51,10 +50,6 @@ def list_files(base: Path) -> List[Path]:
     if not base or not base.exists(): return []
     return [p for p in base.rglob("*") if p.is_file()]
 
-def has_secret(name: str) -> bool:
-    try: return st.secrets.get(name) is not None
-    except Exception: return False
-
 def zip_files(files: List[Path]) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
@@ -65,41 +60,66 @@ def zip_files(files: List[Path]) -> bytes:
     return buf.read()
 
 def load_locations_yaml() -> dict:
-    """Step 2: read standards/locations.yaml (fallback after secrets)."""
+    """Reads standards/locations.yaml (fallback after secrets)."""
     try:
         return yaml.safe_load(LOC_YAML.read_text(encoding="utf-8")) if LOC_YAML.exists() else {}
     except Exception:
         return {}
 
+def _resolve_with_badge(secret_key: str, locs: dict) -> tuple[str, str]:
+    """Return (url, source_label). Source is 'Secret', 'locations.yaml', or 'Not set'."""
+    url = (st.secrets.get(secret_key) or "").strip()
+    if url:
+        return url, "Secret"
+    url = (locs.get(secret_key) or "").strip()
+    if url:
+        return url, "locations.yaml"
+    return "", "Not set"
+
+def _badge(label: str):
+    colors = {
+        "Secret": "#1f6feb",
+        "locations.yaml": "#3fb950",
+        "Not set": "#8b949e",
+    }
+    color = colors.get(label, "#8b949e")
+    st.markdown(
+        f"<span style='display:inline-block;padding:2px 8px;border-radius:12px;"
+        f"border:1px solid rgba(255,255,255,.12); background:{color}22; color:{color};"
+        f"font-size:12px; margin-left:6px'>{label}</span>",
+        unsafe_allow_html=True,
+    )
+
 # ─────────────────────── UI Blocks ──────────────────────
 def ui_quick_access():
-    """Quick links resolve in priority: Secrets → locations.yaml (Step 2)."""
+    """Quick links resolve in priority: Secrets → locations.yaml (Step 2), with source badges."""
     locs = load_locations_yaml()
 
-    iso   = st.secrets.get("DOC_ISO22000_URL") or locs.get("DOC_ISO22000_URL", "")
-    haccp = st.secrets.get("DOC_HACCP_URL")    or locs.get("DOC_HACCP_URL", "")
-    local = st.secrets.get("DOC_LOCAL_REG_URL") or locs.get("DOC_LOCAL_REG_URL", "")
-    sopix = st.secrets.get("DOC_SOP_INDEX_URL") or locs.get("DOC_SOP_INDEX_URL", "")
+    iso,   src_iso   = _resolve_with_badge("DOC_ISO22000_URL", locs)
+    haccp, src_haccp = _resolve_with_badge("DOC_HACCP_URL", locs)
+    local, src_local = _resolve_with_badge("DOC_LOCAL_REG_URL", locs)
+    sopix, src_sopix = _resolve_with_badge("DOC_SOP_INDEX_URL", locs)
 
     with st.expander("Quick access — Documents & SOPs", expanded=False):
         col1, col2, col3 = st.columns(3)
 
         with col1:
-            st.write("📄 **ISO 22000**")
+            st.write("📄 **ISO 22000**", unsafe_allow_html=True)
             if iso: st.link_button("Open", iso)
-            st.caption("Source: Secret or locations.yaml")
+            _badge(src_iso)
         with col2:
             st.write("📄 **HACCP**")
             if haccp: st.link_button("Open", haccp)
-            st.caption("Source: Secret or locations.yaml")
+            _badge(src_haccp)
         with col3:
             st.write("🏛️ **Local Regulation**")
             if local: st.link_button("Open", local)
-            st.caption("Source: Secret or locations.yaml")
+            _badge(src_local)
 
         st.write("🗂️ **Company SOP Index**")
         if sopix: st.link_button("Open SOP Index", sopix)
-        st.caption("Use Home → Set Document Locations to configure if secrets not set.")
+        _badge(src_sopix)
+        st.caption("Use Home → Set Document Locations to configure if secrets are not set.")
 
 def ui_reg_watch():
     st.subheader("🔬 Regulatory Watch")
@@ -213,7 +233,7 @@ def ui_production_packet():
 # ─────────────────────── Page entry ─────────────────────
 def render():
     st.title("Milky Roads AI — Food Safety")
-    ui_quick_access()      # Step 2: reads Secrets → locations.yaml
+    ui_quick_access()      # Step 2: Secrets → locations.yaml (with badges)
     st.divider()
     ui_reg_watch()
     st.divider()
