@@ -3,47 +3,196 @@ name: Repo Factory
 on:
   workflow_dispatch:
     inputs:
-      new_owner:
-        description: "New repo owner (leave blank for current owner)"
-        default: ""
+      owner:
+        description: "Destination owner (leave blank to use current account/org)"
         required: false
-      new_repo:
+        type: string
+      name:
         description: "New repo name"
         required: true
+        type: string
+      private:
+        description: "Create as private repo?"
+        required: true
+        default: true
+        type: boolean
+      description:
+        description: "Repository description"
+        required: false
+        type: string
       template_owner:
-        description: "Template owner (e.g. swanepoelchristo)"
-        required: true
+        description: "Template owner (optional; with template_repo)"
+        required: false
+        type: string
       template_repo:
-        description: "Template repo (must be a GitHub Template repo)"
-        required: true
+        description: "Template repo (optional; with template_owner)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  actions: write
+  issues: write
+  pull-requests: write
 
 jobs:
-  make:
+  create:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      actions: write
-      administration: write
-      issues: write
+    timeout-minutes: 10
+    env:
+      # Token must have 'repo' scope on the target owner/account.
+      GH_TOKEN: ${{ secrets.REPO_MILK_BOX_FACTORY_ADMIN }}
 
     steps:
-      - name: Use repo factory
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.ADMIN_TOKEN }}
-          script: |
-            const owner = core.getInput('new_owner') || context.repo.owner;
-            const name  = core.getInput('new_repo');
-            const tOw   = core.getInput('template_owner');
-            const tRp   = core.getInput('template_repo');
+      - name: ✅ Check out (for context only)
+        uses: actions/checkout@v4
 
-            core.info(`Creating ${owner}/${name} from ${tOw}/${tRp}...`);
-            await github.rest.repos.createUsingTemplate({
-              template_owner: tOw,
-              template_repo: tRp,
-              owner,
-              name,
-              include_all_branches: false,
-              private: false
-            });
-            core.info('Done ✅');
+      - name: 🐍 Set up Python (optional; keeps parity with other workflows)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 🧭 Export PYTHONPATH (parity with other flows)
+        run: echo "PYTHONPATH=$GITHUB_WORKSPACE/streamlit_app" >> $GITHUB_ENV
+
+      - name: 🔐 Validate token exists
+        run: |
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error title=Missing token::REPO_MILK_BOX_FACTORY_ADMIN is not set"
+            exit 1
+          fi
+          echo "Token present (value is masked)."
+
+      - name: 🧪 Check GitHub CLI auth
+        run: |
+          gh --version
+          gh auth status || gh auth status || true
+          # Note: gh prints limited status; token remains masked.
+
+      - name: 🧰 Normalize inputs
+        id: prep
+        shell: bash
+        run: |
+          OWNER="${{ inputs.owner }}"
+          NAME="${{ inputs.name }}"
+          PRIV="${{ inputs.private }}"
+          DESC="${{ inputs.description }}"
+          T_OWNER="${{ inputs.template_owner }}"
+          T_REPO="${{ inputs.template_repo }}"
+
+          if [ -z "$OWNER" ]; then
+            OWNER="${{ github.repository_owner }}"
+          fi
+
+          if [ -z "$NAME" ]; then
+            echo "::error title=Missing name::You must provide an inputs.name"
+            exit 1
+          fi
+
+          if [ -n "$T_OWNER" ] && [ -z "$T_REPO" ]; then
+            echo "::error title=Bad inputs::template_owner provided but template_repo missing"
+            exit 1
+          fi
+          if [ -n "$T_REPO" ] && [ -z "$T_OWNER" ]; then
+            echo "::error title=Bad inputs::template_repo provided but template_owner missing"
+            exit 1
+          fi
+
+          VISIBILITY="public"
+          if [ "$PRIV" = "true" ] || [ "$PRIV" = "True" ]; then
+            VISIBILITY="private"
+          fi
+
+          echo "owner=$OWNER"   >> $GITHUB_OUTPUT
+          echo "name=$NAME"     >> $GITHUB_OUTPUT
+          echo "visibility=$VISIBILITY" >> $GITHUB_OUTPUT
+          echo "desc=$DESC"     >> $GITHUB_OUTPUT
+          echo "t_owner=$T_OWNER" >> $GITHUB_OUTPUT
+          echo "t_repo=$T_REPO"   >> $GITHUB_OUTPUT
+
+          {
+            echo "### Repo Factory – Inputs"
+            echo "- Owner: \`$OWNER\`"
+            echo "- Name: \`$NAME\`"
+            echo "- Visibility: \`$VISIBILITY\`"
+            if [ -n "$DESC" ]; then echo "- Description: $DESC"; fi
+            if [ -n "$T_OWNER" ] && [ -n "$T_REPO" ]; then
+              echo "- Template: \`$T_OWNER/$T_REPO\`"
+            else
+              echo "- Template: (none)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 🏗️ Create repository
+        id: create
+        shell: bash
+        env:
+          OWNER: ${{ steps.prep.outputs.owner }}
+          NAME: ${{ steps.prep.outputs.name }}
+          VIS:  ${{ steps.prep.outputs.visibility }}
+          DESC: ${{ steps.prep.outputs.desc }}
+          T_OWNER: ${{ steps.prep.outputs.t_owner }}
+          T_REPO:  ${{ steps.prep.outputs.t_repo }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "$T_OWNER" ] && [ -n "$T_REPO" ]; then
+            echo "Creating repo from template $T_OWNER/$T_REPO → $OWNER/$NAME ($VIS)"
+            gh api \
+              --method POST \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/$T_OWNER/$T_REPO/generate" \
+              -f owner="$OWNER" -f name="$NAME" \
+              -f private=$([ "$VIS" = "private" ] && echo true || echo false) \
+              -f include_all_branches=false \
+              -F "description=$DESC" \
+              >/tmp/create.json
+          else
+            echo "Creating empty repo → $OWNER/$NAME ($VIS)"
+            # Use gh repo create for simplicity/compatibility
+            if [ "$VIS" = "private" ]; then PRIV_FLAG="--private"; else PRIV_FLAG="--public"; fi
+            gh repo create "$OWNER/$NAME" $PRIV_FLAG --confirm >/tmp/create.txt
+            # Fill a minimal description if provided
+            if [ -n "$DESC" ]; then
+              gh api -X PATCH -H "Accept: application/vnd.github+json" "/repos/$OWNER/$NAME" -f description="$DESC" >/tmp/patch.json
+            fi
+          fi
+
+          URL="https://github.com/$OWNER/$NAME"
+          echo "url=$URL" >> $GITHUB_OUTPUT
+          echo "Created: $URL" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: ⚙️ Enable Dependabot (optional)
+        if: always()
+        shell: bash
+        env:
+          OWNER: ${{ steps.prep.outputs.owner }}
+          NAME:  ${{ steps.prep.outputs.name }}
+        run: |
+          set -euo pipefail
+          # Create a basic dependabot config if none exists.
+          TMP=$(mktemp -d)
+          cd "$TMP"
+          mkdir -p .github
+          cat > .github/dependabot.yml <<'YML'
+          version: 2
+          updates:
+            - package-ecosystem: "github-actions"
+              directory: "/"
+              schedule:
+                interval: "weekly"
+          YML
+          gh repo clone "$OWNER/$NAME" repo-copy -- --depth=1
+          cd repo-copy
+          mkdir -p .github
+          cp -f ../.github/dependabot.yml .github/dependabot.yml
+          git config user.email "actions@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add .github/dependabot.yml
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: add basic Dependabot config"
+            git push origin HEAD
+            echo "Dependabot config added." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Dependabot already configured." >> "$GITHUB_STEP_SUMMARY"
+          fi
