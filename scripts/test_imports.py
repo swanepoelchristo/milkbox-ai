@@ -3,12 +3,11 @@
 Tidy import smoke for milkbox-ai.
 
 What it imports (in this order):
-  1) `streamlit_app` if it exists (folder with __init__.py OR a single .py file,
-     at repo root OR under src/)
-  2) Every real package under src/* (dirs that have __init__.py)
+  1) `streamlit_app` if it exists (package folder OR single .py file at root or under src/)
+  2) Every real package under src/*
 
-It deliberately ignores other top-level folders even if they have __init__.py
-(to avoid importing things that aren't meant to be packages).
+Key fix:
+  - Force the REPO ROOT onto sys.path even though this script runs from scripts/.
 
 CLI:
   --packages "pkg1,pkg2"  -> force exact modules
@@ -18,16 +17,22 @@ Exit codes: 0 ok (or nothing w/ --allow-empty), 1 if any import fails
 from __future__ import annotations
 import argparse, importlib, importlib.util, sys, traceback
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Optional
+
+def ensure_repo_root_on_path() -> None:
+    # script is .../repo/scripts/test_imports.py -> repo root is parents[1]
+    repo_root = Path(__file__).resolve().parents[1]
+    root_str = str(repo_root)
+    if root_str not in sys.path:
+        sys.path.insert(0, root_str)
 
 def ensure_src_on_path() -> None:
     src = Path("src")
     if src.is_dir():
         sys.path.insert(0, str(src.resolve()))
 
-def have_streamlit_app() -> Tuple[str|None, Path|None]:
-    """Return ('module_name', path_if_single_file) for streamlit_app, else (None,None)."""
-    # folder package?
+def have_streamlit_app() -> tuple[Optional[str], Optional[Path]]:
+    # package folder?
     if (Path("streamlit_app") / "__init__.py").exists():
         return "streamlit_app", None
     if (Path("src") / "streamlit_app" / "__init__.py").exists():
@@ -47,14 +52,14 @@ def src_packages() -> List[str]:
                 out.append(p.name)
     return sorted(set(out))
 
-def import_module(name: str) -> Tuple[bool, str]:
+def import_module(name: str) -> tuple[bool, str]:
     try:
         importlib.import_module(name)
         return True, ""
     except Exception as e:
         return False, "".join(traceback.format_exception_only(type(e), e)).strip()
 
-def import_file(path: Path, alias: str) -> Tuple[bool, str]:
+def import_file(path: Path, alias: str) -> tuple[bool, str]:
     try:
         spec = importlib.util.spec_from_file_location(alias, str(path))
         if spec and spec.loader:
@@ -72,24 +77,24 @@ def main() -> int:
     ap.add_argument("--allow-empty", action="store_true")
     args = ap.parse_args()
 
+    # 🔧 critical: make repo root and src importable
+    ensure_repo_root_on_path()
     ensure_src_on_path()
 
     forced = [x.strip() for x in args.packages.split(",") if x.strip()]
-    targets: List[Tuple[str, Path|None]] = []
+    targets: List[tuple[str, Optional[Path]]] = []
 
     if forced:
         targets = [(name, None) for name in forced]
     else:
-        # 1) streamlit_app (module or single file)
         name, path = have_streamlit_app()
         if name:
             targets.append((name, path))
-        # 2) src/* packages
         for pkg in src_packages():
-            if pkg != "streamlit_app":  # avoid duplicate
+            if pkg != "streamlit_app":
                 targets.append((pkg, None))
 
-    print(f"PYTHONPATH head: {sys.path[:3]}")
+    print(f"PYTHONPATH head: {sys.path[:4]}")
     print("Smoke targets:", [t[0] + ("" if t[1] is None else f' (file:{t[1]})') for t in targets])
 
     if not targets:
