@@ -35,7 +35,7 @@ jobs:
       - name: Checkout default branch
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.CHATOPS_TOKEN }}
+          # Use the default GITHUB_TOKEN so pushes/PRs don’t need PAT workflow scope
           ref: ${{ env.DEFAULT_BRANCH }}
 
       # -------------------------------
@@ -149,7 +149,7 @@ jobs:
                 interval: "weekly"
           YAML
 
-          # IMPORTANT: no explicit 'token:' here to avoid Secret Scanning push-protection false positives
+          # IMPORTANT: no explicit 'token:' here to avoid push-protection false positives
           cat > .github/workflows/auto-merge-dependabot.yml <<'YAML'
           name: Auto-merge Dependabot
           on:
@@ -184,7 +184,7 @@ jobs:
         if: contains(env.COMMENT_BODY, '/bootstrap-ci')
         uses: peter-evans/create-pull-request@v6
         with:
-          token: ${{ secrets.CHATOPS_TOKEN }}
+          token: ${{ github.token }}   # use GITHUB_TOKEN to open the PR
           branch: bot/bootstrap-ci
           title: "ci: register 'Smoke' & 'Repo Health'; add pre-commit + Dependabot"
           body: |
@@ -201,7 +201,7 @@ jobs:
         if: contains(env.COMMENT_BODY, '/set-required-checks')
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.CHATOPS_TOKEN }}
+          github-token: ${{ secrets.CHATOPS_TOKEN }}   # PAT still required for admin API
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
@@ -236,7 +236,7 @@ jobs:
         if: contains(env.COMMENT_BODY, '/open-test-pr')
         uses: peter-evans/create-pull-request@v6
         with:
-          token: ${{ secrets.CHATOPS_TOKEN }}
+          token: ${{ github.token }}   # use GITHUB_TOKEN to open the PR
           branch: bot/test-pr
           title: "chore: CI proof PR"
           body: "No-op change to trigger **Smoke** & **Repo Health**."
