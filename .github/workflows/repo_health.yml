@@ -8,6 +8,10 @@ on:
 jobs:
   health:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write   # <-- needed to open/update issues
+      actions: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,7 +28,12 @@ jobs:
 
       - name: Run repo health report
         run: |
-          python scripts/health_report.py --tools-yaml tools.yaml --tools-dir streamlit_app/tools --package-root streamlit_app --out-md repo-health-report.md --out-json repo-health-report.json
+          python scripts/health_report.py \
+            --tools-yaml tools.yaml \
+            --tools-dir streamlit_app/tools \
+            --package-root streamlit_app \
+            --out-md repo-health-report.md \
+            --out-json repo-health-report.json
 
       - name: Upload report artifact
         uses: actions/upload-artifact@v4
@@ -44,6 +53,67 @@ jobs:
           else
             echo "_No report generated._" >> $GITHUB_STEP_SUMMARY
           fi
+
+      # --- New: open or update a single issue if failures exist ---
+      - name: Open/Update 'Repo Health' Issue when failures exist
+        if: failure() || (hashFiles('repo-health-report.json') != '')
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+
+            // If the report doesn't exist, stop.
+            if (!fs.existsSync('repo-health-report.json')) {
+              core.info('No JSON report found; skipping issue logic.');
+              return;
+            }
+
+            const json = JSON.parse(fs.readFileSync('repo-health-report.json', 'utf8'));
+            const failed = Number(json.failed_checks || 0);
+
+            if (failed <= 0) {
+              core.info('No failures; no issue needed.');
+              return;
+            }
+
+            const md = fs.existsSync('repo-health-report.md')
+              ? fs.readFileSync('repo-health-report.md', 'utf8')
+              : 'Repo Health report is missing.';
+
+            const owner = context.repo.owner;
+            const repo  = context.repo.repo;
+            const title = 'Repo Health: Failures detected';
+            const label = 'repo-health';
+
+            // Ensure the label exists (create if missing)
+            try {
+              await github.rest.issues.getLabel({ owner, repo, name: label });
+              core.info(`Label '${label}' already exists.`);
+            } catch (e) {
+              core.info(`Creating label '${label}' …`);
+              await github.rest.issues.createLabel({
+                owner, repo, name: label, color: 'B60205', description: 'Automated repo health failures'
+              });
+            }
+
+            // Look for an open issue with this label + title
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner, repo, state: 'open', labels: label, per_page: 100
+            });
+
+            const existing = issues.find(i => i.title === title);
+
+            if (!existing) {
+              core.info('No existing issue; creating a new one.');
+              await github.rest.issues.create({
+                owner, repo, title, body: md, labels: [label]
+              });
+            } else {
+              core.info(`Updating existing issue #${existing.number}.`);
+              await github.rest.issues.update({
+                owner, repo, issue_number: existing.number, body: md
+              });
+            }
 
       - name: Fail if problems found
         run: |
