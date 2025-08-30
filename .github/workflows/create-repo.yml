@@ -1,41 +1,130 @@
-name: Create Repo from Template
+name: Create Repo (from Template)
 
 on:
   workflow_dispatch:
     inputs:
-      repo_name:
-        description: "New repository name"
-        required: true
-      repo_owner:
-        description: "Repository owner (default: current)"
+      owner:
+        description: "Destination owner (leave blank to use current account/org)"
         required: false
+        type: string
+      name:
+        description: "New repo name (required)"
+        required: true
+        type: string
+      private:
+        description: "Create as private repo?"
+        required: true
+        default: true
+        type: boolean
+      description:
+        description: "Repository description"
+        required: false
+        type: string
       template_owner:
-        description: "Template repo owner"
-        required: true
+        description: "Template owner (optional; with template_repo)"
+        required: false
+        type: string
       template_repo:
-        description: "Template repo name"
-        required: true
+        description: "Template repo (optional; with template_owner)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  actions: write
 
 jobs:
   create:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.REPO_MILK_BOX_FACTORY_ADMIN }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v3
+      - name: ✅ Check out (for context)
+        uses: actions/checkout@v4
 
-      - name: Use Admin Token to Create Repo
-        env:
-          GITHUB_TOKEN: ${{ secrets.REPO_MILK_BOX_FACTORY_ADMIN }}
+      - name: 🔐 Ensure token is present
         run: |
-          echo "Creating repo: ${{ github.event.inputs.repo_name }}"
-          OWNER=${{ github.event.inputs.repo_owner || github.repository_owner }}
-          REPO=${{ github.event.inputs.repo_name }}
-          TEMPLATE_OWNER=${{ github.event.inputs.template_owner }}
-          TEMPLATE_REPO=${{ github.event.inputs.template_repo }}
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error title=Missing token::REPO_MILK_BOX_FACTORY_ADMIN is not set"
+            exit 1
+          fi
 
-          curl -X POST \
-            -H "Authorization: token $GITHUB_TOKEN" \
-            -H "Accept: application/vnd.github.v3+json" \
-            https://api.github.com/repos/$TEMPLATE_OWNER/$TEMPLATE_REPO/generate \
-            -d "{\"owner\":\"$OWNER\",\"name\":\"$REPO\",\"private\":false}"
+      - name: 🧭 Export PYTHONPATH (parity)
+        run: echo "PYTHONPATH=$GITHUB_WORKSPACE/streamlit_app" >> $GITHUB_ENV
+
+      - name: 📦 Normalize inputs
+        id: prep
+        run: |
+          OWNER="${{ inputs.owner }}"
+          NAME="${{ inputs.name }}"
+          PRIV="${{ inputs.private }}"
+          DESC="${{ inputs.description }}"
+          T_OWNER="${{ inputs.template_owner }}"
+          T_REPO="${{ inputs.template_repo }}"
+
+          if [ -z "$OWNER" ]; then
+            OWNER="${{ github.repository_owner }}"
+          fi
+          if [ -z "$NAME" ]; then
+            echo "::error title=Missing name::You must provide inputs.name"
+            exit 1
+          fi
+
+          if [ -n "$T_OWNER" ] && [ -z "$T_REPO" ]; then
+            echo "::error title=Bad inputs::template_owner provided but template_repo missing"
+            exit 1
+          fi
+          if [ -n "$T_REPO" ] && [ -z "$T_OWNER" ]; then
+            echo "::error title=Bad inputs::template_repo provided but template_owner missing"
+            exit 1
+          fi
+
+          VISIBILITY="public"
+          if [ "$PRIV" = "true" ] || [ "$PRIV" = "True" ]; then
+            VISIBILITY="private"
+          fi
+
+          echo "owner=$OWNER"   >> $GITHUB_OUTPUT
+          echo "name=$NAME"     >> $GITHUB_OUTPUT
+          echo "visibility=$VISIBILITY" >> $GITHUB_OUTPUT
+          echo "desc=$DESC"     >> $GITHUB_OUTPUT
+          echo "t_owner=$T_OWNER" >> $GITHUB_OUTPUT
+          echo "t_repo=$T_REPO"   >> $GITHUB_OUTPUT
+
+      - name: 🏗️ Create repository
+        id: create
+        env:
+          OWNER:   ${{ steps.prep.outputs.owner }}
+          NAME:    ${{ steps.prep.outputs.name }}
+          VIS:     ${{ steps.prep.outputs.visibility }}
+          DESC:    ${{ steps.prep.outputs.desc }}
+          T_OWNER: ${{ steps.prep.outputs.t_owner }}
+          T_REPO:  ${{ steps.prep.outputs.t_repo }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "$T_OWNER" ] && [ -n "$T_REPO" ]; then
+            echo "Creating repo from template $T_OWNER/$T_REPO → $OWNER/$NAME ($VIS)"
+            gh api \
+              --method POST \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/$T_OWNER/$T_REPO/generate" \
+              -f owner="$OWNER" -f name="$NAME" \
+              -f private=$([ "$VIS" = "private" ] && echo true || echo false) \
+              -f include_all_branches=false \
+              -F "description=$DESC" \
+              >/tmp/create.json
+          else
+            echo "Creating empty repo → $OWNER/$NAME ($VIS)"
+            if [ "$VIS" = "private" ]; then PRIV_FLAG="--private"; else PRIV_FLAG="--public"; fi
+            gh repo create "$OWNER/$NAME" $PRIV_FLAG --confirm >/tmp/create.txt
+            if [ -n "$DESC" ]; then
+              gh api -X PATCH -H "Accept: application/vnd.github+json" "/repos/$OWNER/$NAME" -f description="$DESC" >/tmp/patch.json
+            fi
+          fi
+
+          URL="https://github.com/$OWNER/$NAME"
+          echo "url=$URL" >> $GITHUB_OUTPUT
+          echo "Created: $URL" >> "$GITHUB_STEP_SUMMARY"
