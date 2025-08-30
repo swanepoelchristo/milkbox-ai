@@ -1,0 +1,6 @@
+# Default owner for everything
+* @swanepoelchristo
+
+# Workflows & CI scripts
+.github/workflows/ @swanepoelchristo
+scripts/ @swanepoelchristo
