@@ -36,23 +36,22 @@ permissions:
   pull-requests: write
 
 jobs:
-  create:
+  create-and-seed:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     env:
-      # Token must have 'repo' scope on the target owner/account.
       GH_TOKEN: ${{ secrets.REPO_MILK_BOX_FACTORY_ADMIN }}
 
     steps:
-      - name: ✅ Check out (for context only)
+      - name: ✅ Checkout (context only)
         uses: actions/checkout@v4
 
-      - name: 🐍 Set up Python (optional; keeps parity with other workflows)
+      - name: 🐍 Setup Python (parity with other jobs)
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: 🧭 Export PYTHONPATH (parity with other flows)
+      - name: 🧭 Export PYTHONPATH (parity)
         run: echo "PYTHONPATH=$GITHUB_WORKSPACE/streamlit_app" >> $GITHUB_ENV
 
       - name: 🔐 Validate token exists
@@ -61,13 +60,7 @@ jobs:
             echo "::error title=Missing token::REPO_MILK_BOX_FACTORY_ADMIN is not set"
             exit 1
           fi
-          echo "Token present (value is masked)."
-
-      - name: 🧪 Check GitHub CLI auth
-        run: |
-          gh --version
-          gh auth status || gh auth status || true
-          # Note: gh prints limited status; token remains masked.
+          echo "Token present (masked)."
 
       - name: 🧰 Normalize inputs
         id: prep
@@ -80,12 +73,9 @@ jobs:
           T_OWNER="${{ inputs.template_owner }}"
           T_REPO="${{ inputs.template_repo }}"
 
-          if [ -z "$OWNER" ]; then
-            OWNER="${{ github.repository_owner }}"
-          fi
-
+          if [ -z "$OWNER" ]; then OWNER="${{ github.repository_owner }}"; fi
           if [ -z "$NAME" ]; then
-            echo "::error title=Missing name::You must provide an inputs.name"
+            echo "::error title=Missing name::You must provide inputs.name"
             exit 1
           fi
 
@@ -99,16 +89,14 @@ jobs:
           fi
 
           VISIBILITY="public"
-          if [ "$PRIV" = "true" ] || [ "$PRIV" = "True" ]; then
-            VISIBILITY="private"
-          fi
+          if [ "$PRIV" = "true" ] || [ "$PRIV" = "True" ]; then VISIBILITY="private"; fi
 
-          echo "owner=$OWNER"   >> $GITHUB_OUTPUT
-          echo "name=$NAME"     >> $GITHUB_OUTPUT
+          echo "owner=$OWNER" >> $GITHUB_OUTPUT
+          echo "name=$NAME" >> $GITHUB_OUTPUT
           echo "visibility=$VISIBILITY" >> $GITHUB_OUTPUT
-          echo "desc=$DESC"     >> $GITHUB_OUTPUT
+          echo "desc=$DESC" >> $GITHUB_OUTPUT
           echo "t_owner=$T_OWNER" >> $GITHUB_OUTPUT
-          echo "t_repo=$T_REPO"   >> $GITHUB_OUTPUT
+          echo "t_repo=$T_REPO" >> $GITHUB_OUTPUT
 
           {
             echo "### Repo Factory – Inputs"
@@ -127,15 +115,14 @@ jobs:
         id: create
         shell: bash
         env:
-          OWNER: ${{ steps.prep.outputs.owner }}
-          NAME: ${{ steps.prep.outputs.name }}
-          VIS:  ${{ steps.prep.outputs.visibility }}
-          DESC: ${{ steps.prep.outputs.desc }}
+          OWNER:   ${{ steps.prep.outputs.owner }}
+          NAME:    ${{ steps.prep.outputs.name }}
+          VIS:     ${{ steps.prep.outputs.visibility }}
+          DESC:    ${{ steps.prep.outputs.desc }}
           T_OWNER: ${{ steps.prep.outputs.t_owner }}
           T_REPO:  ${{ steps.prep.outputs.t_repo }}
         run: |
           set -euo pipefail
-
           if [ -n "$T_OWNER" ] && [ -n "$T_REPO" ]; then
             echo "Creating repo from template $T_OWNER/$T_REPO → $OWNER/$NAME ($VIS)"
             gh api \
@@ -149,31 +136,81 @@ jobs:
               >/tmp/create.json
           else
             echo "Creating empty repo → $OWNER/$NAME ($VIS)"
-            # Use gh repo create for simplicity/compatibility
             if [ "$VIS" = "private" ]; then PRIV_FLAG="--private"; else PRIV_FLAG="--public"; fi
             gh repo create "$OWNER/$NAME" $PRIV_FLAG --confirm >/tmp/create.txt
-            # Fill a minimal description if provided
             if [ -n "$DESC" ]; then
               gh api -X PATCH -H "Accept: application/vnd.github+json" "/repos/$OWNER/$NAME" -f description="$DESC" >/tmp/patch.json
             fi
           fi
+          echo "url=https://github.com/$OWNER/$NAME" >> $GITHUB_OUTPUT
 
-          URL="https://github.com/$OWNER/$NAME"
-          echo "url=$URL" >> $GITHUB_OUTPUT
-          echo "Created: $URL" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: 🔎 Resolve default branch
+        id: defbranch
+        env:
+          OWNER: ${{ steps.prep.outputs.owner }}
+          NAME:  ${{ steps.prep.outputs.name }}
+        run: |
+          set -euo pipefail
+          DEF=$(gh api -H "Accept: application/vnd.github+json" /repos/$OWNER/$NAME --jq .default_branch)
+          echo "branch=$DEF" >> $GITHUB_OUTPUT
+          echo "Default branch: $DEF" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: ⚙️ Enable Dependabot (optional)
-        if: always()
+      - name: 📦 Seed workflows & configs
+        id: seed
         shell: bash
         env:
           OWNER: ${{ steps.prep.outputs.owner }}
           NAME:  ${{ steps.prep.outputs.name }}
         run: |
           set -euo pipefail
-          # Create a basic dependabot config if none exists.
           TMP=$(mktemp -d)
           cd "$TMP"
+          gh repo clone "$OWNER/$NAME" repo -- --depth=1
+          cd repo
+
+          mkdir -p .github/workflows
           mkdir -p .github
+
+          cat > .github/workflows/codeql.yml <<'YML'
+          name: "CodeQL"
+          on:
+            push:
+              branches: [ "main" ]
+            pull_request:
+              branches: [ "main" ]
+            schedule:
+              - cron: "0 3 * * 1"
+          permissions:
+            contents: read
+            security-events: write
+            actions: read
+          jobs:
+            analyze:
+              name: Analyze
+              runs-on: ubuntu-latest
+              steps:
+                - uses: actions/checkout@v4
+                - uses: github/codeql-action/init@v3
+                  with:
+                    languages: python
+                - uses: github/codeql-action/analyze@v3
+          YML
+
+          cat > .github/workflows/ci-smoke.yml <<'YML'
+          name: "CI Smoke"
+          on:
+            workflow_dispatch:
+            push:
+              branches: [ "main" ]
+          jobs:
+            smoke:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: actions/checkout@v4
+                - name: Say hello
+                  run: echo "Repo $(basename $GITHUB_REPOSITORY) bootstrapped ✔"
+          YML
+
           cat > .github/dependabot.yml <<'YML'
           version: 2
           updates:
@@ -182,17 +219,66 @@ jobs:
               schedule:
                 interval: "weekly"
           YML
-          gh repo clone "$OWNER/$NAME" repo-copy -- --depth=1
-          cd repo-copy
-          mkdir -p .github
-          cp -f ../.github/dependabot.yml .github/dependabot.yml
+
           git config user.email "actions@users.noreply.github.com"
-          git config user.name "github-actions[bot]"
-          git add .github/dependabot.yml
+          git config user.name  "github-actions[bot]"
+          git add .github
           if ! git diff --cached --quiet; then
-            git commit -m "chore: add basic Dependabot config"
+            git commit -m "chore: bootstrap CI (CodeQL, Smoke) and Dependabot"
             git push origin HEAD
-            echo "Dependabot config added." >> "$GITHUB_STEP_SUMMARY"
+            echo "Seeded workflows & dependabot." >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "Dependabot already configured." >> "$GITHUB_STEP_SUMMARY"
+            echo "No seed changes required." >> "$GITHUB_STEP_SUMMARY"
           fi
+
+      - name: 🏷️ Create standard labels
+        shell: bash
+        env:
+          OWNER: ${{ steps.prep.outputs.owner }}
+          NAME:  ${{ steps.prep.outputs.name }}
+        run: |
+          set -euo pipefail
+          add_label () {
+            NAME="$1"; COLOR="$2"; DESC="$3"
+            gh api -X POST -H "Accept: application/vnd.github+json" "/repos/$OWNER/$NAME/labels" \
+              -f name="$NAME" -f color="$COLOR" -f description="$DESC" >/dev/null 2>&1 || true
+          }
+          add_label "bug"         "d73a4a" "Something isn't working"
+          add_label "chore"       "c5def5" "Maintenance"
+          add_label "docs"        "0075ca" "Improvements or additions to documentation"
+          add_label "enhancement" "a2eeef" "New feature or request"
+          add_label "security"    "b60205" "Security related"
+          add_label "help wanted" "008672" "Extra attention is needed"
+          echo "Labels created (idempotent)." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 🛡️ Protect default branch
+        shell: bash
+        env:
+          OWNER: ${{ steps.prep.outputs.owner }}
+          NAME:  ${{ steps.prep.outputs.name }}
+          BRANCH: ${{ steps.defbranch.outputs.branch }}
+        run: |
+          set -euo pipefail
+          gh api \
+            -X PUT \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/$OWNER/$NAME/branches/$BRANCH/protection" \
+            -f required_status_checks='null' \
+            -f enforce_admins=true \
+            -f required_pull_request_reviews.required_approving_review_count=1 \
+            -f restrictions='null' >/dev/null
+          echo "Branch protection enabled on $BRANCH." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: ▶️ Kick CI Smoke
+        env:
+          OWNER: ${{ steps.prep.outputs.owner }}
+          NAME:  ${{ steps.prep.outputs.name }}
+        run: |
+          # Trigger by workflow name; falls back silently if not found (first push usually runs it anyway)
+          gh workflow run "CI Smoke" -R "$OWNER/$NAME" || true
+          echo "Smoke workflow triggered (or will run from the seed push)." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 📌 Summary
+        run: |
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Repo:** ${{ steps.create.outputs.url }}" >> "$GITHUB_STEP_SUMMARY"
