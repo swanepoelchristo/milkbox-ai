@@ -149,6 +149,7 @@ jobs:
                 interval: "weekly"
           YAML
 
+          # IMPORTANT: no explicit 'token:' here to avoid Secret Scanning push-protection false positives
           cat > .github/workflows/auto-merge-dependabot.yml <<'YAML'
           name: Auto-merge Dependabot
           on:
@@ -169,7 +170,6 @@ jobs:
                   if: steps.meta.outputs.update-type != 'version-update:semver-major'
                   uses: peter-evans/enable-pull-request-automerge@v3
                   with:
-                    token: ${{ secrets.GITHUB_TOKEN }}
                     merge-method: squash
           YAML
 
