@@ -1,6 +1,4 @@
-# Default owner for everything
-* @swanepoelchristo
+# CODEOWNERS
+# This file tells GitHub who must review changes
 
-# Workflows & CI scripts
-.github/workflows/ @swanepoelchristo
-scripts/ @swanepoelchristo
+*   @swanepoelchristo
