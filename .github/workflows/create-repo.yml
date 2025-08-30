@@ -37,6 +37,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Preflight — verify token and tools
+        run: |
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error title=Missing token::REPO_MILK_BOX_FACTORY_ADMIN is not set"
+            exit 1
+          fi
+          gh --version
+          gh api rate_limit >/dev/null
+
       - name: Create repo
         id: create
         run: |
@@ -52,9 +61,17 @@ jobs:
           fi
           echo "url=https://github.com/$OWNER/$NAME" >> $GITHUB_OUTPUT
 
+      - name: Preflight — seed script exists
+        run: |
+          test -f .github/scripts/seed.sh || (echo "::error title=Missing seed.sh::.github/scripts/seed.sh not found"; exit 1)
+          chmod +x .github/scripts/seed.sh
+
       - name: Seed workflows, labels, protection
         run: |
           OWNER="${{ inputs.owner || github.repository_owner }}"
           NAME="${{ inputs.name }}"
-          bash .github/workflows/scripts/seed.sh "$OWNER" "$NAME"
+          .github/scripts/seed.sh "$OWNER" "$NAME"
+
+      - name: Summary
+        run: echo "Repo created → ${{ steps.create.outputs.url }}" >> $GITHUB_STEP_SUMMARY
 
