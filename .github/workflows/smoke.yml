@@ -1,77 +1,28 @@
 name: Tool Import Smoke
 
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
   workflow_dispatch:
+  push:
+    branches: [ "main" ]
 
 jobs:
   smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-
     steps:
-      - name: ✅ Check out repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: 🐍 Set up Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
-      # IMPORTANT: Tell Python where our tools live
-      - name: 🧭 Set PYTHONPATH (streamlit_app)
-        run: echo "PYTHONPATH=$GITHUB_WORKSPACE/streamlit_app" >> $GITHUB_ENV
-
-      # Optional, but handy when debugging
-      - name: 🗂 Show repo tree (top level)
+      - name: Install requirements (best-effort)
         run: |
-          ls -la
-          echo
-          echo "---- streamlit_app ----"
-          ls -la streamlit_app || true
-          echo
-          echo "---- streamlit_app/tools ----"
-          ls -la streamlit_app/tools || true
+          if [ -f requirements.txt ]; then
+            python -m pip install --upgrade pip
+            python -m pip install -r requirements.txt || true
+          fi
 
-      # Run imports for each tool module.
-      # If any import fails, we exit non-zero and the job goes red.
-      - name: 🔎 Run import smoke test
+      - name: Run import smoke
         run: |
-          set -euo pipefail
-
-          modules=(
-            "tools.hello"
-            "tools.notes"
-            "tools.invoice_gen"
-            "tools.bar_tools"
-            "tools.cv_builder"
-            "tools.cv_builder_pro"
-            "tools.demo_2"
-            "tools.builder"
-            "tools.food_safety"
-          )
-
-          echo "## Import Results" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-
-          for m in "${modules[@]}"; do
-            if python - <<PY
-import importlib
-import sys
-m = "${m}"
-importlib.import_module(m)
-PY
-            then
-              echo "✅ \`${m}\` imported" | tee -a "$GITHUB_STEP_SUMMARY"
-            else
-              echo "❌ \`${m}\` FAILED to import" | tee -a "$GITHUB_STEP_SUMMARY"
-              echo "::error title=Import failed::${m} did not import"
-              exit 1
-            fi
-          done
-
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "All listed modules imported successfully. 🎉" >> "$GITHUB_STEP_SUMMARY"
+          python .github/scripts/test_imports.py
