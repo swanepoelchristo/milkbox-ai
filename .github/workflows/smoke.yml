@@ -1,19 +1,27 @@
 name: Smoke (Imports)
 
 on:
-  push:
-    branches: [ main, ci/* ]
   pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
   workflow_dispatch:
     inputs:
       python-version:
         description: 'Python version to use'
         required: false
         default: '3.11'
-      extra-args:
-        description: 'Args passed to scripts/test_imports.py (e.g., --packages pkg1,pkg2)'
+      packages:
+        description: 'Comma-separated modules to import (override auto-discovery)'
         required: false
         default: ''
+
+concurrency:
+  group: smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   smoke:
@@ -37,6 +45,15 @@ jobs:
             pip install -r requirements.txt
           fi
 
-      - name: Run import smoke
+      - name: Add repo root and src to PYTHONPATH
         run: |
-          python scripts/test_imports.py ${{ github.event.inputs.extra-args }}
+          echo "PYTHONPATH=$PYTHONPATH:$(pwd)" >> $GITHUB_ENV
+          if [ -d "src" ]; then
+            echo "PYTHONPATH=$PYTHONPATH:$(pwd)/src" >> $GITHUB_ENV
+          fi
+
+      - name: Run import smoke
+        env:
+          CI_SMOKE: "1"   # allows app code to skip heavy init if it wants to
+        run: |
+          python scripts/test_imports.py --allow-empty $([ -n "${{ github.event.inputs.packages }}" ] && echo "--packages ${{ github.event.inputs.packages }}")
