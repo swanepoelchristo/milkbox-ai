@@ -35,11 +35,18 @@ jobs:
       - name: Checkout default branch
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.CHATOPS_TOKEN }}
           ref: ${{ env.DEFAULT_BRANCH }}
 
+      - name: Force origin to use GITHUB_TOKEN
+        run: |
+          set -euo pipefail
+          git config user.name  "milkbox-ai-bot"
+          git config user.email "actions@users.noreply.github.com"
+          # Ensure all pushes use the workflow's GITHUB_TOKEN, never your PAT
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
       # -------------------------------
-      # /bootstrap-ci  -> create CI, pre-commit, Dependabot, auto-merge; open PR
+      # /bootstrap-ci -> create CI, pre-commit, Dependabot, auto-merge; open PR
       # -------------------------------
       - name: Bootstrap CI (create files & PR)
         if: contains(env.COMMENT_BODY, '/bootstrap-ci')
@@ -149,7 +156,7 @@ jobs:
                 interval: "weekly"
           YAML
 
-          # IMPORTANT: no explicit 'token:' here to avoid Secret Scanning push-protection false positives
+          # No explicit token here to avoid push-protection false positives
           cat > .github/workflows/auto-merge-dependabot.yml <<'YAML'
           name: Auto-merge Dependabot
           on:
@@ -173,8 +180,6 @@ jobs:
                     merge-method: squash
           YAML
 
-          git config user.name "milkbox-ai-bot"
-          git config user.email "actions@users.noreply.github.com"
           git checkout -b bot/bootstrap-ci
           git add .
           git commit -m "ci: bootstrap CI (Smoke & Repo Health), pre-commit, Dependabot, auto-merge"
@@ -184,7 +189,7 @@ jobs:
         if: contains(env.COMMENT_BODY, '/bootstrap-ci')
         uses: peter-evans/create-pull-request@v6
         with:
-          token: ${{ secrets.CHATOPS_TOKEN }}
+          token: ${{ github.token }}   # GITHUB_TOKEN opens the PR
           branch: bot/bootstrap-ci
           title: "ci: register 'Smoke' & 'Repo Health'; add pre-commit + Dependabot"
           body: |
@@ -195,13 +200,13 @@ jobs:
             Merge this, then set them as required checks.
 
       # -------------------------------
-      # /set-required-checks  -> branch protection on main
+      # /set-required-checks -> branch protection on main
       # -------------------------------
       - name: Set branch protection (main)
         if: contains(env.COMMENT_BODY, '/set-required-checks')
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.CHATOPS_TOKEN }}
+          github-token: ${{ secrets.CHATOPS_TOKEN }}   # PAT still required for admin API
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
@@ -218,7 +223,7 @@ jobs:
             });
 
       # -------------------------------
-      # /open-test-pr  -> tiny PR to prove gating
+      # /open-test-pr -> tiny PR to prove gating
       # -------------------------------
       - name: Open test PR (branch + commit)
         if: contains(env.COMMENT_BODY, '/open-test-pr')
@@ -236,7 +241,7 @@ jobs:
         if: contains(env.COMMENT_BODY, '/open-test-pr')
         uses: peter-evans/create-pull-request@v6
         with:
-          token: ${{ secrets.CHATOPS_TOKEN }}
+          token: ${{ github.token }}
           branch: bot/test-pr
           title: "chore: CI proof PR"
           body: "No-op change to trigger **Smoke** & **Repo Health**."
