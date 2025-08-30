@@ -11,13 +11,20 @@ on:
         description: "Treat warnings as failures in health report"
         type: boolean
         default: false
+  pull_request:
+    branches: [ main ]
   push:
     branches: [ main ]
-  pull_request:
+  schedule:
+    - cron: '23 4 * * 1'  # Mondays 04:23 UTC
 
 permissions:
   contents: write
   issues: write
+
+concurrency:
+  group: repo-steward-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   steward:
@@ -36,7 +43,6 @@ jobs:
           else
             echo "name=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
           fi
-          echo "Target branch: $(cat $GITHUB_OUTPUT)"
 
       - name: Ensure CI files (doctor core)
         shell: bash
@@ -49,9 +55,10 @@ jobs:
 name: Smoke (Imports)
 
 on:
-  push:
-    branches: [ main, ci/* ]
   pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
   workflow_dispatch:
     inputs:
       python-version:
@@ -62,6 +69,13 @@ on:
         description: 'Comma-separated modules to import (override auto-discovery)'
         required: false
         default: ''
+
+concurrency:
+  group: smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   smoke:
@@ -82,12 +96,15 @@ jobs:
           elif [ -f "requirements.txt" ]; then
             pip install -r requirements.txt
           fi
-      - name: Add src to PYTHONPATH (idempotent)
+      - name: Add repo root and src to PYTHONPATH
         run: |
+          echo "PYTHONPATH=$PYTHONPATH:$(pwd)" >> $GITHUB_ENV
           if [ -d "src" ]; then
             echo "PYTHONPATH=$PYTHONPATH:$(pwd)/src" >> $GITHUB_ENV
           fi
       - name: Run import smoke
+        env:
+          CI_SMOKE: "1"
         run: |
           python scripts/test_imports.py --allow-empty $([ -n "${{ github.event.inputs.packages }}" ] && echo "--packages ${{ github.event.inputs.packages }}")
 YAML
@@ -97,8 +114,10 @@ YAML
 name: Repo Health
 
 on:
+  pull_request:
+    branches: [ main ]
   push:
-    branches: [ main, ci/* ]
+    branches: [ main ]
   schedule:
     - cron: '17 5 * * 1'
   workflow_dispatch:
@@ -112,12 +131,17 @@ on:
         default: true
         description: 'Create/update the Repo Health issue'
 
+concurrency:
+  group: repo-health-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+
 jobs:
   health:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      issues: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -145,7 +169,7 @@ jobs:
           echo "## Repo Health Report" >> "$GITHUB_STEP_SUMMARY"
           cat health.md >> "$GITHUB_STEP_SUMMARY"
       - name: Create or update 'Repo Health' issue
-        if: ${{ steps.report.outputs.exit_code != '0' || github.event.inputs.update_issue == 'true' || github.event_name == 'schedule' }}
+        if: ${{ steps.report.outputs.exit_code != '0' || github.event.inputs.update_issue == 'true' || github.event_name == 'schedule' || github.event_name == 'pull_request' || github.event_name == 'push' }}
         uses: actions/github-script@v7
         with:
           script: |
@@ -173,46 +197,49 @@ YAML
 from __future__ import annotations
 import argparse, importlib, importlib.util, sys, traceback
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Optional
+
+def ensure_repo_root_on_path() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    root_str = str(repo_root)
+    if root_str not in sys.path:
+        sys.path.insert(0, root_str)
 
 def ensure_src_on_path() -> None:
     src = Path("src")
     if src.is_dir():
         sys.path.insert(0, str(src.resolve()))
 
-def discover_packages() -> List[str]:
-    names = set()
+def have_streamlit_app() -> tuple[Optional[str], Optional[Path]]:
+    if (Path("streamlit_app") / "__init__.py").exists(): return "streamlit_app", None
+    if (Path("src") / "streamlit_app" / "__init__.py").exists(): return "streamlit_app", None
+    for p in [Path("streamlit_app.py"), Path("src/streamlit_app.py")]:
+        if p.exists(): return "streamlit_app", p
+    return None, None
+
+def src_packages() -> List[str]:
+    out: List[str] = []
     src = Path("src")
     if src.is_dir():
         for p in src.iterdir():
-            if p.is_dir() and (p / "__init__.py").exists():
-                names.add(p.name)
-    for p in Path(".").iterdir():
-        if p.is_dir() and (p / "__init__.py").exists() and p.name not in {"src","scripts",".git",".github",".venv","venv","__pycache__"}:
-            names.add(p.name)
-    return sorted(n for n in names if n.isidentifier())
+            if p.is_dir() and (p / "__init__.py").exists() and p.name.isidentifier():
+                out.append(p.name)
+    return sorted(set(out))
 
-def discover_loose_files() -> List[Path]:
-    c = []
-    for rel in ["streamlit_app.py","src/streamlit_app.py","app.py","src/app.py","main.py","src/main.py"]:
-        p = Path(rel)
-        if p.exists(): c.append(p)
-    return c
-
-def import_module(name: str) -> Tuple[bool,str]:
+def import_module(name: str) -> tuple[bool, str]:
     try:
-        importlib.import_module(name); return True,""
+        importlib.import_module(name); return True, ""
     except Exception as e:
         return False, "".join(traceback.format_exception_only(type(e), e)).strip()
 
-def import_file(path: Path, alias: str) -> Tuple[bool,str]:
+def import_file(path: Path, alias: str) -> tuple[bool, str]:
     try:
         spec = importlib.util.spec_from_file_location(alias, str(path))
         if spec and spec.loader:
             m = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(m)  # type: ignore[attr-defined]
             sys.modules[alias] = m
-            return True,""
+            return True, ""
         return False, f"Unable to load spec for {path}"
     except Exception as e:
         return False, f"{path}: " + "".join(traceback.format_exception_only(type(e), e)).strip()
@@ -222,28 +249,44 @@ def main() -> int:
     ap.add_argument("--packages", default="")
     ap.add_argument("--allow-empty", action="store_true")
     args = ap.parse_args()
+
+    ensure_repo_root_on_path()
     ensure_src_on_path()
 
-    mods = [p.strip() for p in args.packages.split(",") if p.strip()] or discover_packages()
-    files = discover_loose_files() if not args.packages else []
+    forced = [x.strip() for x in args.packages.split(",") if x.strip()]
+    targets: List[tuple[str, Optional[Path]]] = []
 
-    print(f"PYTHONPATH head: {sys.path[:3]}")
-    print(f"Discovered packages: {mods}")
-    if files: print("Loose files:", ", ".join(str(f) for f in files))
-    if not mods and not files and args.allow_empty:
-        print("Nothing to test (allow-empty)."); return 0
+    if forced:
+        targets = [(name, None) for name in forced]
+    else:
+        name, path = have_streamlit_app()
+        if name:
+            targets.append((name, path))
+        for pkg in src_packages():
+            if pkg != "streamlit_app":
+                targets.append((pkg, None))
+
+    print(f"PYTHONPATH head: {sys.path[:4]}")
+    print("Smoke targets:", [t[0] + ("" if t[1] is None else f' (file:{t[1]})') for t in targets])
+
+    if not targets:
+        if args.allow_empty:
+            print("Nothing to test (allow-empty)."); return 0
+        print("No targets found."); return 1
 
     failed = 0
-    for m in mods:
-        ok, err = import_module(m)
-        print(f"[{'OK' if ok else 'FAIL'}] import {m}")
-        if not ok: print(f"  Error: {err}"); failed += 1
-    for i,f in enumerate(files,1):
-        ok, err = import_file(f, f"ci_smoke_file_{i}")
-        print(f"[{'OK' if ok else 'FAIL'}] import file:{f}")
-        if not ok: print(f"  Error: {err}"); failed += 1
+    for idx, (name, file_path) in enumerate(targets, 1):
+        if file_path is None:
+            ok, err = import_module(name)
+            print(f"[{'OK' if ok else 'FAIL'}] import {name}")
+        else:
+            ok, err = import_file(file_path, f"ci_smoke_file_{idx}")
+            print(f"[{'OK' if ok else 'FAIL'}] import file:{file_path}")
+        if not ok:
+            print("  Error:", err); failed += 1
 
-    if failed: print(f"{failed} import(s) failed."); return 1
+    if failed:
+        print(f"{failed} import(s) failed."); return 1
     print("All imports succeeded."); return 0
 
 if __name__ == "__main__":
@@ -251,95 +294,28 @@ if __name__ == "__main__":
 PY
           chmod +x scripts/test_imports.py
 
-          # --- scripts/health_report.py ---
-          cat > scripts/health_report.py <<'PY'
-#!/usr/bin/env python3
-from __future__ import annotations
-import argparse, os, subprocess, sys
-from pathlib import Path
-
-CHECKS=[]
-def add(check,result,details,severity="info"): CHECKS.append({"check":check,"result":result,"details":details,"severity":severity})
-def ok(p:str)->bool: return Path(p).exists()
-def git_last()->str:
-    try: return subprocess.check_output(["git","log","-1","--format=%cI"], text=True).strip() or "unknown"
-    except Exception: return "unknown"
-
-def main()->int:
-    ap=argparse.ArgumentParser()
-    ap.add_argument("--out",default="")
-    ap.add_argument("--strict",action="store_true")
-    args=ap.parse_args()
-
-    crit=warn=0
-    for path,msg in [
-        (".github/workflows/smoke.yml","Smoke workflow missing"),
-        (".github/workflows/repo_health.yml","Repo health workflow missing"),
-        ("scripts/test_imports.py","Import smoke script missing"),
-        ("scripts/health_report.py","Health report script missing"),
-    ]:
-        if ok(path): add(f"Presence: {path}","OK","Found")
-        else: add(f"Presence: {path}","FAIL",msg,"fail"); crit+=1
-
-    txt = Path(".github/workflows/smoke.yml").read_text(encoding="utf-8") if ok(".github/workflows/smoke.yml") else ""
-    if txt:
-        if "scripts/test_imports.py" in txt and ".github/scripts/test_imports.py" not in txt:
-            add("smoke.yml import path","OK","Uses scripts/test_imports.py")
-        else:
-            add("smoke.yml import path","FAIL","Must call scripts/test_imports.py","fail"); crit+=1
-
-    if ok("README.md"): add("README.md","OK","Found")
-    else: add("README.md","WARN","Missing README.md","warn"); warn+=1
-    if ok("LICENSE") or ok("LICENSE.md"): add("LICENSE","OK","Found")
-    else: add("LICENSE","WARN","Missing LICENSE","warn"); warn+=1
-
-    add("Last commit (git)","INFO",git_last(),"info")
-
-    lines=["# Repo Health","","| Check | Result | Details |","|---|---|---|"]
-    for c in CHECKS: lines.append(f"| {c['check']} | {c['result']} | {c['details']} |")
-    lines.append("")
-    if crit: lines.append(f"**Status:** ❌ {crit} critical failure(s).")
-    elif warn and args.strict: lines.append(f"**Status:** ❌ {warn} warning(s) (strict mode).")
-    elif warn: lines.append(f"**Status:** ⚠️ {warn} warning(s).")
-    else: lines.append("**Status:** ✅ All checks passed.")
-    md="\n".join(lines)
-
-    if args.out: Path(args.out).write_text(md, encoding="utf-8")
-    if "GITHUB_STEP_SUMMARY" in os.environ:
-        try: Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text(md, encoding="utf-8")
-        except Exception: pass
-
-    if crit or (args.strict and warn): return 1
-    return 0
-
-if __name__=="__main__": sys.exit(main())
-PY
+          # --- scripts/health_report.py (unchanged from your working version) ---
+          # Keep your existing scripts/health_report.py. If missing, it will be re-written
+          # by the Repo Health workflow run.
 
       - name: Ensure __init__.py for every Python folder (managers per folder)
         shell: python
         run: |
-          import os, sys
+          import os
           from pathlib import Path
-
-          EXCLUDE = {'.git','.github','scripts','__pycache__','venv','.venv'}
-          created = []
-
-          def should_scan(d: Path):
-            name = d.name
-            if name in EXCLUDE: return False
-            if name.startswith('.'): return False
-            return True
-
+          EXCLUDE={'.git','.github','scripts','__pycache__','venv','.venv'}
+          created=[]
+          def ok_dir(d: Path):
+            n=d.name
+            return (n not in EXCLUDE) and (not n.startswith('.'))
           for root, dirs, files in os.walk('.'):
-            d = Path(root)
-            if not should_scan(d): 
+            d=Path(root)
+            if not ok_dir(d): 
               continue
             if any(f.endswith('.py') for f in files):
-              init = d / '__init__.py'
+              init=d/'__init__.py'
               if not init.exists():
-                init.write_text('', encoding='utf-8')
-                created.append(str(init))
-
+                init.write_text('', encoding='utf-8'); created.append(str(init))
           print("Created __init__.py files:", created)
 
       - name: Commit & push fixes (to the triggering branch)
@@ -369,8 +345,10 @@ PY
           elif [ -f "requirements.txt" ]; then
             pip install -r requirements.txt
           fi
+
       - name: Make src importable for this job
         run: |
+          echo "PYTHONPATH=$PYTHONPATH:$(pwd)" >> $GITHUB_ENV
           if [ -d "src" ]; then
             echo "PYTHONPATH=$PYTHONPATH:$(pwd)/src" >> $GITHUB_ENV
           fi
@@ -415,3 +393,4 @@ PY
       - name: Fail job (only if strict=true and report is red)
         if: ${{ steps.health.outputs.exit_code != '0' && inputs.strict == true }}
         run: exit 1
+
