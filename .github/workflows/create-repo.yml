@@ -1,80 +1,236 @@
-name: Create Repo From Template
+name: Create Repo from Template
+
 on:
   workflow_dispatch:
     inputs:
-      name:
-        description: "New repo name"
+      new_owner:
+        description: "Destination org/user (blank = current owner)"
+        required: false
+        default: ""
+      repo_name:
+        description: "New repository name"
         required: true
-      template:
-        description: "Template key: fastapi|streamlit"
+      template_owner:
+        description: "Template repository owner (e.g. swanepoelchristo)"
         required: true
-        default: "fastapi"
+      template_repo:
+        description: "Template repository name (must be a GitHub template repo)"
+        required: true
       private:
-        description: "Private? true|false"
-        required: true
-        default: "true"
+        description: "Make the new repo private?"
+        type: boolean
+        required: false
+        default: true
+      description:
+        description: "Optional repo description"
+        required: false
+        default: ""
+      protect_default_branch:
+        description: "Apply simple branch protection to default branch"
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: read
+  metadata: read
+  # We call the GitHub REST API with a classic token (repo scope) via header.
+  # These job-permissions don't gate that token—still useful for steps that use GITHUB_TOKEN.
 
 jobs:
   create:
+    name: Create repository
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      actions: write
+
+    # Make the secret available to steps:
     env:
-      OWNER: "swanepoelchristo"
+      ADMIN_TOKEN: ${{ secrets.REPO_MILK_BOX_FACTORY_ADMIN }}
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 20 }
+      - name: Check out (not strictly required, but handy for actions/gh/outputs)
+        uses: actions/checkout@v4
 
-      - name: Create repo from template + basic protection + labels
-        uses: actions/github-script@v7
+      - name: 💡 Validate secret is present (no token printed)
+        shell: bash
+        run: |
+          if [ -z "$ADMIN_TOKEN" ]; then
+            echo "❌ ADMIN_TOKEN is empty. Add repository secret REPO_MILK_BOX_FACTORY_ADMIN first."
+            exit 1
+          fi
+          echo "::add-mask::$ADMIN_TOKEN"
+          echo "✅ Secret detected (length: ${#ADMIN_TOKEN})."
+
+      - name: 🧭 Resolve destination owner
+        id: who
+        shell: bash
+        run: |
+          OWNER="${{ github.repository_owner }}"
+          if [ -n "${{ github.event.inputs.new_owner }}" ]; then
+            OWNER="${{ github.event.inputs.new_owner }}"
+          fi
+          echo "owner=$OWNER" >> "$GITHUB_OUTPUT"
+          echo "Using owner: $OWNER"
+
+      - name: 🔎 Who am I (with the token)?
+        id: me
+        shell: bash
+        run: |
+          set -eu
+          curl -fsSL \
+            -H "Authorization: token $ADMIN_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/user | jq -r '.login' | tee /tmp/actor.txt
+          ACTOR=$(cat /tmp/actor.txt)
+          if [ -z "$ACTOR" ] || [ "$ACTOR" = "null" ]; then
+            echo "❌ Token did not authenticate against the API."
+            exit 1
+          fi
+          echo "actor=$ACTOR" >> "$GITHUB_OUTPUT"
+          echo "✅ Token belongs to: $ACTOR"
+
+      - name: ✅ Check template exists
+        shell: bash
+        run: |
+          set -eu
+          TOWNER="${{ github.event.inputs.template_owner }}"
+          TREPO="${{ github.event.inputs.template_repo }}"
+          echo "Checking template $TOWNER/$TREPO…"
+          curl -fsSL \
+            -H "Authorization: token $ADMIN_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$TOWNER/$TREPO" >/dev/null
+          echo "✅ Template found."
+
+      - name: 🏗️ Create repository from template (idempotent)
+        id: create
+        shell: bash
         env:
-          ORG_ADMIN_PAT: ${{ secrets.ORG_ADMIN_PAT }}
-        with:
-          github-token: ${{ env.ORG_ADMIN_PAT }}
-          script: |
-            // 'core' and 'github' are provided by github-script. Do NOT require them.
-            const owner = process.env.OWNER;
+          DEST_OWNER: ${{ steps.who.outputs.owner }}
+        run: |
+          set -eu
+          TOWNER="${{ github.event.inputs.template_owner }}"
+          TREPO="${{ github.event.inputs.template_repo }}"
+          NAME="${{ github.event.inputs.repo_name }}"
+          PRIVATE="${{ github.event.inputs.private }}"
+          DESC="${{ github.event.inputs.description }}"
+          DEST="$DEST_OWNER/$NAME"
 
-            const name = core.getInput('name');
-            const templateKey = core.getInput('template');
-            const isPrivate = (core.getInput('private') || 'true') === 'true';
-            const tmplRepo = templateKey === 'fastapi' ? 'template-fastapi' : 'template-streamlit';
+          echo "Target repo: $DEST"
 
-            // 1) Create from template (source repo must be marked "Template repository")
-            await github.request('POST /repos/{template_owner}/{template_repo}/generate', {
-              template_owner: owner,
-              template_repo: tmplRepo,
-              owner,
-              name,
-              private: isPrivate,
-              include_all_branches: false
-            });
+          # First, check if repo already exists (idempotency)
+          if curl -fsSL \
+            -H "Authorization: token $ADMIN_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$DEST" >/dev/null 2>&1; then
+            echo "ℹ️ Repo already exists: https://github.com/$DEST"
+            echo "html_url=https://github.com/$DEST" >> "$GITHUB_OUTPUT"
+            echo "already_exists=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
-            // 2) Protect main (minimal)
-            try {
-              await github.request('PUT /repos/{owner}/{repo}/branches/{branch}/protection', {
-                owner, repo: name, branch: 'main',
-                required_status_checks: null,
-                enforce_admins: true,
-                required_pull_request_reviews: { required_approving_review_count: 1 },
-                restrictions: null
-              });
-            } catch (e) {
-              core.warning('Branch protection skipped: ' + (e?.message || e));
-            }
+          # Generate from template
+          body=$(jq -n \
+            --arg owner "$DEST_OWNER" \
+            --arg name "$NAME" \
+            --argjson private "$PRIVATE" \
+            --arg desc "$DESC" \
+            '{owner:$owner, name:$name, private:$private, description:$desc, include_all_branches:false}')
 
-            // 3) Add a few labels (best effort)
-            const labels = [
-              { name: 'MVP', color: '3E4B9E' },
-              { name: 'bug', color: 'D73A4A' },
-              { name: 'enhancement', color: 'A2EEEF' }
-            ];
-            for (const l of labels) {
-              try {
-                await github.request('POST /repos/{owner}/{repo}/labels', { owner, repo: name, ...l });
-              } catch (e) {
-                core.warning('Label add failed: ' + l.name + ' — ' + (e?.message || e));
-              }
-            }
+          echo "Creating from template $TOWNER/$TREPO…"
+          resp=$(curl -sS -X POST \
+            -H "Authorization: token $ADMIN_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            -d "$body" \
+            "https://api.github.com/repos/$TOWNER/$TREPO/generate")
+
+          html_url=$(echo "$resp" | jq -r '.html_url // empty')
+          message=$(echo "$resp" | jq -r '.message // empty')
+
+          if [ -n "$html_url" ]; then
+            echo "✅ Created: $html_url"
+            echo "html_url=$html_url" >> "$GITHUB_OUTPUT"
+            echo "already_exists=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "❌ Create failed: $message"
+            echo "Full response:"
+            echo "$resp" | jq .
+            exit 1
+          fi
+
+      - name: 🔒 (Optional) Protect default branch
+        if: ${{ inputs.protect_default_branch }}
+        shell: bash
+        env:
+          DEST_OWNER: ${{ steps.who.outputs.owner }}
+        run: |
+          set -eu
+          NAME="${{ github.event.inputs.repo_name }}"
+          DEST="$DEST_OWNER/$NAME"
+
+          # Read default branch
+          default_branch=$(curl -fsSL \
+            -H "Authorization: token $ADMIN_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$DEST" | jq -r '.default_branch')
+
+          echo "Protecting $DEST branch: $default_branch"
+          curl -sS -X PUT \
+            -H "Authorization: token $ADMIN_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            -d @- \
+            "https://api.github.com/repos/$DEST/branches/$default_branch/protection" <<'JSON'
+          {
+            "required_status_checks": null,
+            "enforce_admins": true,
+            "required_pull_request_reviews": {
+              "required_approving_review_count": 1
+            },
+            "restrictions": null
+          }
+JSON
+          echo "✅ Branch protection applied."
+
+      - name: 🏷️ Add baseline labels
+        shell: bash
+        env:
+          DEST_OWNER: ${{ steps.who.outputs.owner }}
+        run: |
+          set -eu
+          NAME="${{ github.event.inputs.repo_name }}"
+          DEST="$DEST_OWNER/$NAME"
+
+          labels='[
+            {"name":"status:todo","color":"ededed"},
+            {"name":"status:in-progress","color":"fbca04"},
+            {"name":"status:blocked","color":"b60205"},
+            {"name":"status:done","color":"0e8a16"}
+          ]'
+
+          for row in $(echo "$labels" | jq -c '.[]'); do
+            n=$(echo "$row" | jq -r '.name')
+            echo "Ensuring label: $n"
+            curl -sS -X POST \
+              -H "Authorization: token $ADMIN_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "Content-Type: application/json" \
+              -d "$row" \
+              "https://api.github.com/repos/$DEST/labels" >/dev/null || true
+          done
+          echo "✅ Labels ensured."
+
+      - name: 📣 Summary
+        if: always()
+        run: |
+          echo "## Repo Factory Result" >> $GITHUB_STEP_SUMMARY
+          echo "- Owner: ${{ steps.who.outputs.owner }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Template: ${{ github.event.inputs.template_owner }}/${{ github.event.inputs.template_repo }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.create.outputs.already_exists }}" = "true" ]; then
+            echo "- Status: Already existed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- Status: Created new repository" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ -n "${{ steps.create.outputs.html_url }}" ]; then
+            echo "- URL: ${{ steps.create.outputs.html_url }}" >> $GITHUB_STEP_SUMMARY
+          fi
