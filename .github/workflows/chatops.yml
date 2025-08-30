@@ -3,8 +3,6 @@ name: ChatOps
 on:
   issue_comment:
     types: [created]
-  pull_request_target:
-    types: [opened, reopened, synchronize, ready_for_review]
 
 permissions:
   contents: write
@@ -12,17 +10,16 @@ permissions:
   issues: read
   discussions: read
   actions: read
-  administration: write
 
 jobs:
   chatops:
-    if: >
-      github.event_name == 'issue_comment' &&
-      contains(github.event.comment.body, '/')
+    # Only react to slash commands in comments
+    if: github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/')
     runs-on: ubuntu-latest
     env:
       REPO: ${{ github.repository }}
       OWNER: ${{ github.repository_owner }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
       CHATOPS_TOKEN: ${{ secrets.CHATOPS_TOKEN }}
       COMMENT_BODY: ${{ github.event.comment.body }}
       AUTHOR_ASSOC: ${{ github.event.comment.author_association }}
@@ -31,23 +28,23 @@ jobs:
       - name: Authorize caller (owner/member/collaborator only)
         run: |
           case "${AUTHOR_ASSOC}" in
-            OWNER|MEMBER|COLLABORATOR) echo "Authorized" ;;
-            *) echo "Not authorized: ${AUTHOR_ASSOC}"; exit 1 ;;
+            OWNER|MEMBER|COLLABORATOR) echo "Authorized";;
+            *) echo "Not authorized: ${AUTHOR_ASSOC}"; exit 1;;
           esac
 
       - name: Checkout default branch
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.CHATOPS_TOKEN }}
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ env.DEFAULT_BRANCH }}
 
       # -------------------------------
-      # /bootstrap-ci  -> creates files and opens PR
+      # /bootstrap-ci  -> create CI, pre-commit, Dependabot, auto-merge; open PR
       # -------------------------------
       - name: Bootstrap CI (create files & PR)
         if: contains(env.COMMENT_BODY, '/bootstrap-ci')
         run: |
-          set -e
+          set -euo pipefail
           mkdir -p .github/workflows
 
           cat > .github/workflows/ci.yml <<'YAML'
@@ -65,17 +62,16 @@ jobs:
               name: Smoke
               runs-on: ubuntu-latest
               steps:
-                - name: Checkout
-                  uses: actions/checkout@v4
+                - uses: actions/checkout@v4
                 - name: Sanity ping
                   run: echo "✅ Smoke check running"
                 - name: Detect Node project
                   id: detect_node
                   run: |
                     if [ -f package.json ]; then
-                      echo "node_project=true" >> $GITHUB_OUTPUT
+                      echo "node_project=true" >> "$GITHUB_OUTPUT"
                     else
-                      echo "node_project=false" >> $GITHUB_OUTPUT
+                      echo "node_project=false" >> "$GITHUB_OUTPUT"
                     fi
                 - name: Setup Node
                   if: steps.detect_node.outputs.node_project == 'true'
@@ -102,15 +98,13 @@ jobs:
               name: Repo Health
               runs-on: ubuntu-latest
               steps:
-                - name: Checkout
-                  uses: actions/checkout@v4
+                - uses: actions/checkout@v4
                 - name: Basic repo checks
                   run: |
                     set -e
-                    test -f CODEOWNERS || (echo "❌ Missing CODEOWNERS at repo root"; exit 1)
+                    test -f CODEOWNERS || { echo "❌ Missing CODEOWNERS at repo root"; exit 1; }
                     echo "✅ CODEOWNERS present"
-                - name: Setup Python
-                  uses: actions/setup-python@v5
+                - uses: actions/setup-python@v5
                   with:
                     python-version: '3.x'
                 - name: Install pre-commit
@@ -161,8 +155,8 @@ jobs:
             pull_request_target:
               types: [opened, synchronize, reopened, ready_for_review]
           permissions:
-            pull-requests: write
             contents: write
+            pull-requests: write
           jobs:
             enable-auto-merge:
               if: github.actor == 'dependabot[bot]'
@@ -201,7 +195,7 @@ jobs:
             Merge this, then set them as required checks.
 
       # -------------------------------
-      # /set-required-checks  -> branch rules
+      # /set-required-checks  -> branch protection on main
       # -------------------------------
       - name: Set branch protection (main)
         if: contains(env.COMMENT_BODY, '/set-required-checks')
@@ -211,7 +205,7 @@ jobs:
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
-            const branch = 'main';
+            const branch = context.payload.repository.default_branch || 'main';
             await github.request('PUT /repos/{owner}/{repo}/branches/{branch}/protection', {
               owner, repo, branch,
               required_status_checks: {
@@ -229,7 +223,7 @@ jobs:
       - name: Open test PR (branch + commit)
         if: contains(env.COMMENT_BODY, '/open-test-pr')
         run: |
-          set -e
+          set -euo pipefail
           git config user.name "milkbox-ai-bot"
           git config user.email "actions@users.noreply.github.com"
           git checkout -b bot/test-pr
