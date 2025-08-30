@@ -1,26 +1,42 @@
-name: Tool Import Smoke
+name: Smoke (Imports)
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main, ci/* ]
   pull_request:
-    branches: [ "main" ]
+  workflow_dispatch:
+    inputs:
+      python-version:
+        description: 'Python version to use'
+        required: false
+        default: '3.11'
+      extra-args:
+        description: 'Args passed to scripts/test_imports.py (e.g., --packages pkg1,pkg2)'
+        required: false
+        default: ''
 
 jobs:
   smoke:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
+          python-version: ${{ github.event.inputs.python-version || '3.11' }}
 
-      - name: Install requirements (best-effort)
+      - name: Install project (best-effort)
         run: |
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          set -e
+          python -m pip install --upgrade pip
+          if [ -f "pyproject.toml" ]; then
+            pip install -e .
+          elif [ -f "requirements.txt" ]; then
+            pip install -r requirements.txt
+          fi
 
       - name: Run import smoke
-        run: python scripts/test_imports.py
+        run: |
+          python scripts/test_imports.py ${{ github.event.inputs.extra-args }}
