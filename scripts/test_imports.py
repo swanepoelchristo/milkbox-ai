@@ -1,34 +1,40 @@
 import importlib
-import yaml
-from pathlib import Path
+import os
+import sys
 
-TOOLS_YAML = Path(__file__).resolve().parent.parent / "tools.yaml"
+# Ensure repo root and streamlit_app are on sys.path
+REPO_ROOT = os.path.abspath(os.path.dirname(__file__) + "/../../")
+STREAMLIT_APP = os.path.join(REPO_ROOT, "streamlit_app")
+for p in [REPO_ROOT, STREAMLIT_APP]:
+    if p not in sys.path:
+        sys.path.insert(0, p)
 
-def load_tools():
-    with open(TOOLS_YAML, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)["tools"]
+modules = [
+    "tools.hello",
+    "tools.notes",
+    "tools.invoice_gen",
+    "tools.bar_tools",
+    "tools.cv_builder",
+    "tools.cv_builder_pro",
+    "tools.demo_2",
+    "tools.builder",
+    "tools.food_safety",
+]
 
-def run_import_tests():
-    tools = load_tools()
-    print("🔍 Running tool import smoke test...\n")
-    failed = []
-    for tool in tools:
-        key = tool["key"]
-        module_path = tool["module"]
-        try:
-            importlib.import_module(module_path)
-            print(f"✅ {key} → {module_path} OK")
-        except Exception as e:
-            print(f"❌ {key} → {module_path} FAILED: {e}")
-            failed.append((key, str(e)))
-    print("\n---\n")
-    if failed:
-        print("⚠️ Import errors detected:")
-        for key, err in failed:
-            print(f"   - {key}: {err}")
-        exit(1)
-    else:
-        print("🎉 All tools imported successfully!")
+print("=== Import smoke ===")
+failures = []
+for m in modules:
+    try:
+        importlib.import_module(m)
+        print(f"  ✔ {m}")
+    except Exception as e:
+        print(f"  ✖ {m} -> {e}")
+        failures.append(m)
 
-if __name__ == "__main__":
-    run_import_tests()
+if failures:
+    print("\nImport errors detected:")
+    for m in failures:
+        print(" -", m)
+    sys.exit(1)
+
+print("All tool modules imported successfully.")
