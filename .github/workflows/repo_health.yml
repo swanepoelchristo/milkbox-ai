@@ -1,10 +1,12 @@
 name: Repo Health
 
 on:
+  pull_request:
+    branches: [ main ]
   push:
-    branches: [ main, ci/* ]
+    branches: [ main ]
   schedule:
-    - cron: '17 5 * * 1'  # Mondays 05:17 UTC (morning SAST)
+    - cron: '17 5 * * 1'  # Mondays 05:17 UTC
   workflow_dispatch:
     inputs:
       strict:
@@ -16,12 +18,17 @@ on:
         default: true
         description: 'Create/update the "Repo Health" issue'
 
+concurrency:
+  group: repo-health-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+
 jobs:
   health:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      issues: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -31,8 +38,6 @@ jobs:
         with:
           python-version: '3.11'
 
-      # We want to always create/update the issue even if the script signals red,
-      # so we capture the exit code and fail at the end.
       - name: Generate health report
         id: report
         run: |
@@ -41,7 +46,6 @@ jobs:
           python scripts/health_report.py --out health.md $([ "${{ github.event.inputs.strict }}" = "true" ] && echo "--strict")
           code=$?
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
-          echo "Script exit code: $code"
           set -e
 
       - name: Upload report artifact
@@ -57,7 +61,7 @@ jobs:
           cat health.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Create or update 'Repo Health' issue
-        if: ${{ steps.report.outputs.exit_code != '0' || github.event.inputs.update_issue == 'true' || github.event_name == 'schedule' }}
+        if: ${{ steps.report.outputs.exit_code != '0' || github.event.inputs.update_issue == 'true' || github.event_name == 'schedule' || github.event_name == 'pull_request' || github.event_name == 'push' }}
         uses: actions/github-script@v7
         with:
           script: |
@@ -66,23 +70,15 @@ jobs:
             const { owner, repo } = context.repo;
             const title = 'Repo Health';
             const labels = ['automation','health'];
-
-            const issues = await github.paginate(
-              github.rest.issues.listForRepo,
-              { owner, repo, state: 'open', per_page: 100 }
-            );
+            const issues = await github.paginate(github.rest.issues.listForRepo, { owner, repo, state: 'open', per_page: 100 });
             const existing = issues.find(i => i.title === title);
-
             if (existing) {
               await github.rest.issues.update({ owner, repo, issue_number: existing.number, title, body });
               await github.rest.issues.setLabels({ owner, repo, issue_number: existing.number, labels });
-              core.setOutput('issue-number', String(existing.number));
             } else {
-              const created = await github.rest.issues.create({ owner, repo, title, body, labels });
-              core.setOutput('issue-number', String(created.data.number));
+              await github.rest.issues.create({ owner, repo, title, body, labels });
             }
 
       - name: Fail if health is red (only when strict=true)
         if: ${{ steps.report.outputs.exit_code != '0' && github.event.inputs.strict == 'true' }}
         run: exit 1
-
