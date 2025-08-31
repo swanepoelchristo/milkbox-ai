@@ -220,7 +220,7 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const num = '${{ steps.pr.outputs["pull-request-number"] }}' || '(unknown)';
+            const num = '${{ steps.pr.outputs.pull-request-number }}' || '(unknown)';
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -375,12 +375,12 @@ jobs:
             requirements.txt
 
       - name: Comment fix result
-        if: always() && github.event_name == 'issue_comment'
+        if: always() && contains(env.COMMENT_BODY, '/house-fix')
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const num = '${{ steps.fixpr.outputs["pull-request-number"] }}' || '(no changes)';
+            const num = '${{ steps.fixpr.outputs.pull-request-number }}' || '(no changes)';
             const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
             await github.rest.issues.createComment({
               owner: context.repo.owner,
