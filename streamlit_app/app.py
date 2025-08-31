@@ -1,30 +1,69 @@
 # streamlit_app/app.py
 
-from __future__ import annotations  # stop runtime eval of type hints
-
+from __future__ import annotations  # stop runtime eval of hints
 from typing import Any, Dict, List, Optional
-
-# NEW: these were missing and caused runtime errors
-import importlib
-import yaml
-import streamlit as st
-
-# --- Ensure "tools.*" imports resolve ---
 import sys
 from pathlib import Path
 
+import streamlit as st
+import yaml
+import importlib
+import importlib.util
+from types import ModuleType
+
+# --- Ensure "tools.*" imports resolve ---
 APP_ROOT = Path(__file__).resolve().parent  # .../streamlit_app
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 # ----------------------------------------
 
-
 # ─────────────────────────────────────────────────────────
 # Config
 # tools.yaml lives at the REPO ROOT (not inside streamlit_app/)
 # ─────────────────────────────────────────────────────────
-TOOLS_FILE = Path(__file__).resolve().parent.parent / "tools.yaml"
+TOOLS_FILE = APP_ROOT.parent / "tools.yaml"
 
+# ─────────────────────────────────────────────────────────
+# Helper: resilient importer for tools.*
+# ─────────────────────────────────────────────────────────
+def import_tool_module(module_path: str) -> Optional[ModuleType]:
+    """
+    Try normal importlib import; if that fails and module_path starts with
+    'tools.', try to load from:
+      - streamlit_app/tools/<name>.py
+      - streamlit_app/tools/<name>/__init__.py
+      - streamlit_app/tools/<name>    (extensionless single file)
+    Returns the loaded module or None.
+    """
+    # 1) Try the standard way first
+    try:
+        return importlib.import_module(module_path)
+    except ModuleNotFoundError:
+        pass  # fall through to custom paths
+    except Exception:
+        # any other import error should bubble up (syntax error, etc.)
+        raise
+
+    # 2) Fallbacks for non-standard layouts
+    if not module_path.startswith("tools."):
+        return None
+
+    name = module_path.split(".", 1)[1]
+    base = APP_ROOT / "tools"
+    candidates = [
+        base / f"{name}.py",
+        base / name / "__init__.py",
+        base / name,  # extensionless file
+    ]
+    for p in candidates:
+        if p.exists():
+            spec = importlib.util.spec_from_file_location(module_path, p)
+            if spec and spec.loader:
+                mod = importlib.util.module_from_spec(spec)
+                sys.modules[module_path] = mod
+                spec.loader.exec_module(mod)  # type: ignore[attr-defined]
+                return mod
+    return None
 
 # ─────────────────────────────────────────────────────────
 # Data loading
@@ -54,7 +93,6 @@ def load_tools_config() -> Dict[str, Any]:
         return {"tools": []}
     return cfg
 
-
 def normalize_tools(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Return a list of tool dicts with safe defaults."""
     items = raw.get("tools", []) or []
@@ -80,13 +118,11 @@ def normalize_tools(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
             )
     return cleaned
 
-
 def tool_by_key(tools: List[Dict[str, Any]], key: str) -> Optional[Dict[str, Any]]:
     for t in tools:
         if t["key"] == key:
             return t
     return None
-
 
 # ─────────────────────────────────────────────────────────
 # Sidebar UI
@@ -138,7 +174,6 @@ def render_sidebar(tools: List[Dict[str, Any]]) -> Optional[str]:
     st.session_state["selected_tool"] = selected_key
     return selected_key
 
-
 # ─────────────────────────────────────────────────────────
 # Main area
 # ─────────────────────────────────────────────────────────
@@ -147,8 +182,8 @@ def render_selected_tool(tools: List[Dict[str, Any]], key: Optional[str]) -> Non
     Import and render the selected tool.
 
     NOTE: We import EXACTLY what the YAML specifies in 'module'
-    (e.g., 'tools.invoice_gen'), without auto-prefixing. This keeps
-    imports consistent and avoids ModuleNotFoundError for valid paths.
+    (e.g., 'tools.invoice_gen'). The importer is forgiving and
+    supports .py files, package dirs, and extensionless single files.
     """
     if not key:
         st.header("Milkbox AI Toolbox")
@@ -162,16 +197,25 @@ def render_selected_tool(tools: List[Dict[str, Any]], key: Optional[str]) -> Non
 
     module_path = t["module"]
     try:
-        mod = importlib.import_module(module_path)
-    except ModuleNotFoundError as e:
-        st.error(
-            f"Couldn't import module `{module_path}`.\n\n"
-            "Make sure the module path in tools.yaml matches the file on disk.\n"
-            f"Details: {e}"
-        )
-        return
+        mod = import_tool_module(module_path)
     except Exception as e:
         st.error(f"Error importing `{module_path}`: {e}")
+        return
+
+    if not mod:
+        # Give a helpful hint about what was tried.
+        name = module_path.split(".", 1)[1] if module_path.startswith("tools.") else module_path
+        base = APP_ROOT / "tools"
+        tried = [
+            str(base / f"{name}.py"),
+            str(base / name / "__init__.py"),
+            str(base / name),
+        ]
+        st.error(
+            "Couldn't import module `{}`.\n\n"
+            "Make sure the module path in tools.yaml matches the file on disk.\n"
+            "Tried the following paths:\n- {}".format(module_path, "\n- ".join(tried))
+        )
         return
 
     # Render
@@ -183,19 +227,15 @@ def render_selected_tool(tools: List[Dict[str, Any]], key: Optional[str]) -> Non
     else:
         st.error(f"Module `{module_path}` has no function `render()`.")
 
-
 # ─────────────────────────────────────────────────────────
 # App entrypoint
 # ─────────────────────────────────────────────────────────
-def main() -> None:
+def main():
     st.set_page_config(page_title="Milkbox AI Toolbox", layout="wide")
-
     cfg = load_tools_config()
     tools = normalize_tools(cfg)
-
     selected = render_sidebar(tools)
     render_selected_tool(tools, selected)
-
 
 if __name__ == "__main__":
     main()
