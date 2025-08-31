@@ -1,3 +1,5 @@
+from typing import Any, Dict
+
 # --- Ensure "tools.*" imports resolve ---
 import sys
 from pathlib import Path
