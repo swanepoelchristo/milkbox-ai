@@ -27,7 +27,7 @@ jobs:
       CHATOPS_TOKEN: ${{ secrets.CHATOPS_TOKEN }}
       COMMENT_BODY: ${{ github.event.comment.body }}
       AUTHOR_ASSOC: ${{ github.event.comment.author_association }}
-      ISSUE_NUMBER: ${{ github.event.issue.number }}
+      ISSUE_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
 
     steps:
       - name: Authorize caller (owner/member/collaborator only)
@@ -51,7 +51,7 @@ jobs:
           git remote set-url origin "https://x-access-token:${{ env.CHATOPS_TOKEN }}@github.com/${{ env.REPO }}.git"
 
       # -------------------------------
-      # /bootstrap-ci
+      # /bootstrap-ci (create CI + pre-commit + dependabot)
       # -------------------------------
       - name: Bootstrap CI (create files & PR)
         if: contains(env.COMMENT_BODY, '/bootstrap-ci')
@@ -66,7 +66,8 @@ jobs:
             push:
               branches: [main]
             workflow_dispatch:
-          permissions: { contents: read }
+          permissions:
+            contents: read
           jobs:
             smoke:
               name: Smoke (Imports)
@@ -148,14 +149,14 @@ jobs:
         if: contains(env.COMMENT_BODY, '/bootstrap-ci')
         uses: peter-evans/create-pull-request@v6
         with:
-          token: ${{ github.token }}
+          token: ${{ env.CHATOPS_TOKEN }}
           base: ${{ env.DEFAULT_BRANCH }}
           branch: bot/bootstrap-ci
           title: "ci: register 'Smoke (Imports)' & 'Repo Health'; add pre-commit + Dependabot"
           body: "Opened by ChatOps."
 
       # -------------------------------
-      # /set-required-checks
+      # /set-required-checks (protect main)
       # -------------------------------
       - name: Set branch protection (main)
         if: contains(env.COMMENT_BODY, '/set-required-checks')
@@ -178,7 +179,7 @@ jobs:
             });
 
       # -------------------------------
-      # /open-test-pr  (re-use single PR)
+      # /open-test-pr (reuse single PR)
       # -------------------------------
       - name: Prepare bot/test-pr from origin/main (always reset)
         if: contains(env.COMMENT_BODY, '/open-test-pr')
@@ -207,7 +208,7 @@ jobs:
         if: contains(env.COMMENT_BODY, '/open-test-pr')
         uses: peter-evans/create-pull-request@v6
         with:
-          token: ${{ github.token }}
+          token: ${{ secrets.GITHUB_TOKEN }}
           base: ${{ env.DEFAULT_BRANCH }}
           branch: bot/test-pr
           title: "Test PR (bot)"
@@ -217,17 +218,18 @@ jobs:
         if: contains(env.COMMENT_BODY, '/open-test-pr')
         uses: actions/github-script@v7
         with:
-          github-token: ${{ github.token }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
+            const num = '${{ steps.pr.outputs["pull-request-number"] }}' || '(unknown)';
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: context.payload.issue.number,
-              body: `✅ Updated/created **PR #${{ steps.pr.outputs['pull-request-number'] }}** to trigger checks.`
+              issue_number: ${{ env.ISSUE_NUMBER }},
+              body: `✅ Updated/created **PR #${num}** to trigger checks.`
             });
 
       # -------------------------------
-      # /house-diagnose  &  /house-fix
+      # /house-diagnose (Streamlit)
       # -------------------------------
       - name: Detect app entry
         id: entry
@@ -258,7 +260,6 @@ jobs:
         if: contains(env.COMMENT_BODY, '/house-diagnose') || contains(env.COMMENT_BODY, '/house-fix')
         run: |
           set -euo pipefail
-          APP="${{ steps.entry.outputs.path }}"
           python - <<'PY' > house_diag.log 2>&1 || true
           import os,runpy,traceback
           os.environ["STREAMLIT_SERVER_HEADLESS"]="true"
@@ -278,7 +279,7 @@ jobs:
               except Exception:
                   other=True
                   traceback.print_exc()
-          print("MISSING:", ",".join(sorted(missing)))
+          print("MISSING:", ",".join(sorted(x for x in missing if x)))
           print("OTHER_ERR:", other)
           PY
           tail -n 120 house_diag.log || true
@@ -299,73 +300,91 @@ jobs:
         if: contains(env.COMMENT_BODY, '/house-diagnose')
         uses: actions/github-script@v7
         with:
-          github-token: ${{ github.token }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
             const log = fs.existsSync('house_diag.log') ? fs.readFileSync('house_diag.log','utf8') : '';
             const tail = log.split('\n').slice(-80).join('\n');
-            const miss = ('${{ steps.diag.outputs.missing }}' || '').trim() || '(none)';
+            const entry = '${{ steps.entry.outputs.path }}' || 'not-found';
+            const miss  = '${{ steps.diag.outputs.missing }}' || '(none)';
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: Number(process.env.ISSUE_NUMBER),
+              issue_number: ${{ env.ISSUE_NUMBER }},
               body:
                 `**House Diagnose**\n\n` +
-                `- Entry: \`${'${{ steps.entry.outputs.path }}' || 'not-found (import-only)'}\`\n` +
+                `- Entry: \`${entry}\`\n` +
                 `- Missing packages: \`${miss}\`\n\n` +
                 `Log tail:\n\`\`\`\n${tail}\n\`\`\`\n` +
                 `Full log attached as artifact **house_diag.log**.`
             });
 
+      # -------------------------------
+      # /house-fix → add missing pkgs to requirements.txt and open PR
+      # -------------------------------
       - name: Prepare fix change
         if: contains(env.COMMENT_BODY, '/house-fix')
+        id: prepare_fix
         run: |
           set -euo pipefail
           MISS="${{ steps.diag.outputs.missing }}"
           if [ -z "$MISS" ]; then
             echo "No missing modules detected — nothing to fix."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+
           touch requirements.txt
           cp requirements.txt requirements.txt.bak
+
+          # Add any missing packages (simple, case-insensitive check)
           for PKG in ${MISS//,/ }; do
+            [ -z "$PKG" ] && continue
             if ! grep -i -q "^${PKG}\b" requirements.txt; then
               echo "$PKG" >> requirements.txt
             fi
           done
-          if diff -u requirements.txt.bak requirements.txt; then
-            echo "No changes to requirements.txt"; exit 0
+
+          if diff -u requirements.txt.bak requirements.txt >/dev/null 2>&1; then
+            echo "No changes to requirements.txt"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+
           git add requirements.txt
+          echo "changed=true" >> "$GITHUB_OUTPUT"
 
       - name: Open PR with fix
-        if: contains(env.COMMENT_BODY, '/house-fix')
+        if: contains(env.COMMENT_BODY, '/house-fix') && steps.prepare_fix.outputs.changed == 'true'
         id: fixpr
         uses: peter-evans/create-pull-request@v6
         with:
-          token: ${{ github.token }}
+          token: ${{ env.CHATOPS_TOKEN }}
           base: ${{ env.DEFAULT_BRANCH }}
           branch: bot/house-fix-${{ github.run_id }}
+          commit-message: "fix(streamlit): add missing packages to requirements.txt"
           title: "fix(streamlit): add missing packages to requirements.txt"
           body: |
-            Detected missing packages and added them to `requirements.txt`.
+            Detected missing packages via /house-diagnose and added them to `requirements.txt`.
 
             Missing: `${{ steps.diag.outputs.missing }}`
             Entry: `${{ steps.entry.outputs.path || 'not-found' }}`
 
-            See artifact **house_diag.log** for full error log.
+            See artifact **house_diag.log** for the full error log.
+          add-paths: |
+            requirements.txt
 
       - name: Comment fix result
-        if: contains(env.COMMENT_BODY, '/house-fix')
+        if: always() && github.event_name == 'issue_comment'
         uses: actions/github-script@v7
         with:
-          github-token: ${{ github.token }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const prNum = ('${{ steps.fixpr.outputs.pull-request-number }}' || '').trim() || '(no changes)';
+            const num = '${{ steps.fixpr.outputs["pull-request-number"] }}' || '(no changes)';
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: Number(process.env.ISSUE_NUMBER),
-              body: `🔧 Fix PR: **#${prNum}** (if "(no changes)", nothing to fix was detected).`
+              issue_number: ${{ env.ISSUE_NUMBER }},
+              body: `🔧 Fix PR: **#${num}**\nRun: ${runUrl}`
             });
-
