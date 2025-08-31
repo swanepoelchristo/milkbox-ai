@@ -17,6 +17,11 @@ jobs:
     if: github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/')
     runs-on: ubuntu-latest
 
+    # Prevent two overlapping runs on the same issue/PR from racing each other
+    concurrency:
+      group: chatops-${{ github.repository }}-${{ github.event.issue.number || github.event.pull_request.number || 'na' }}
+      cancel-in-progress: false
+
     env:
       REPO: ${{ github.repository }}
       OWNER: ${{ github.repository_owner }}
@@ -244,14 +249,27 @@ jobs:
       - name: Open test PR (branch + commit)
         if: contains(env.COMMENT_BODY, '/open-test-pr')
         run: |
-          set -euo pipefail
+          set -eo pipefail
           git config user.name  "milkbox-ai-bot"
           git config user.email "actions@users.noreply.github.com"
-          git switch -C bot/test-pr
+
+          # Work from the exact tip of the remote default branch
+          git fetch origin --prune
+          git switch --detach "origin/${DEFAULT_BRANCH}"
+          git branch -D bot/test-pr 2>/dev/null || true
+          git switch -c bot/test-pr
+
           date > .ci_proof
           git add .ci_proof
           git commit -m "chore: trigger CI to prove required checks" || true
-          git push -u origin bot/test-pr --force-with-lease
+
+          # If the remote branch exists, delete it first to avoid 'stale info' rejects
+          if git ls-remote --exit-code --heads origin bot/test-pr >/dev/null 2>&1; then
+            git push origin :bot/test-pr
+          fi
+
+          # Fresh push and set upstream
+          git push -u origin bot/test-pr
 
       - name: Create PR (test)
         if: contains(env.COMMENT_BODY, '/open-test-pr')
