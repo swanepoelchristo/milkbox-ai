@@ -1,4 +1,5 @@
-from typing import Dict, Any, List
+from __future__ import annotations   # safe: stops runtime eval of hints
+from typing import Any, Dict, List, Optional
 
 # --- Ensure "tools.*" imports resolve ---
 import sys
