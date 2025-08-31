@@ -1,5 +1,13 @@
-from __future__ import annotations   # safe: stops runtime eval of hints
+# streamlit_app/app.py
+
+from __future__ import annotations  # stop runtime eval of type hints
+
 from typing import Any, Dict, List, Optional
+
+# NEW: these were missing and caused runtime errors
+import importlib
+import yaml
+import streamlit as st
 
 # --- Ensure "tools.*" imports resolve ---
 import sys
@@ -9,6 +17,7 @@ APP_ROOT = Path(__file__).resolve().parent  # .../streamlit_app
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 # ----------------------------------------
+
 
 # ─────────────────────────────────────────────────────────
 # Config
@@ -49,7 +58,7 @@ def load_tools_config() -> Dict[str, Any]:
 def normalize_tools(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Return a list of tool dicts with safe defaults."""
     items = raw.get("tools", []) or []
-    cleaned = []
+    cleaned: List[Dict[str, Any]] = []
     for t in items:
         if not isinstance(t, dict):
             continue
@@ -117,7 +126,12 @@ def render_sidebar(tools: List[Dict[str, Any]]) -> Optional[str]:
         default_index = 0
         if selected_key in keys:
             default_index = keys.index(selected_key)
-        idx = st.sidebar.radio("Choose a tool", options=list(range(len(keys))), format_func=lambda i: labels[i], index=default_index)
+        idx = st.sidebar.radio(
+            "Choose a tool",
+            options=list(range(len(keys))),
+            format_func=lambda i: labels[i],
+            index=default_index,
+        )
         selected_key = keys[idx]
 
     # Persist selection
@@ -173,7 +187,7 @@ def render_selected_tool(tools: List[Dict[str, Any]], key: Optional[str]) -> Non
 # ─────────────────────────────────────────────────────────
 # App entrypoint
 # ─────────────────────────────────────────────────────────
-def main():
+def main() -> None:
     st.set_page_config(page_title="Milkbox AI Toolbox", layout="wide")
 
     cfg = load_tools_config()
