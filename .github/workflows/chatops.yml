@@ -17,7 +17,7 @@ jobs:
     if: github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/')
     runs-on: ubuntu-latest
 
-    # Prevent two overlapping runs on the same issue/PR from racing each other
+    # Prevent overlapping runs on the same issue/PR from racing each other
     concurrency:
       group: chatops-${{ github.repository }}-${{ github.event.issue.number || github.event.pull_request.number || 'na' }}
       cancel-in-progress: false
@@ -26,7 +26,7 @@ jobs:
       REPO: ${{ github.repository }}
       OWNER: ${{ github.repository_owner }}
       DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-      CHATOPS_TOKEN: ${{ secrets.CHATOPS_TOKEN }}   # PAT with repo admin perms (for branch protection only)
+      CHATOPS_TOKEN: ${{ secrets.CHATOPS_TOKEN }}   # PAT with repo admin perms (for branch protection + pushes)
       COMMENT_BODY: ${{ github.event.comment.body }}
       AUTHOR_ASSOC: ${{ github.event.comment.author_association }}
 
@@ -38,22 +38,23 @@ jobs:
             *) echo "Not authorized: ${AUTHOR_ASSOC}"; exit 1;;
           esac
 
-      - name: Checkout default branch
+      - name: Checkout default branch (full history; no auto creds)
         uses: actions/checkout@v4
         with:
           ref: ${{ env.DEFAULT_BRANCH }}
+          fetch-depth: 0
+          persist-credentials: false
 
-      - name: Force origin to use default token
+      - name: Use PAT for pushes (origin uses CHATOPS_TOKEN)
         run: |
           git config user.name  "milkbox-ai-bot"
-          git config user.email "actions@users.noreply.github.com"
-          # Use the workflow’s token directly in the URL (no $GITHUB_TOKEN env var)
-          git remote set-url origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+          git config user.email "ai@milkyroadscheese.com"
+          git remote set-url origin "https://x-access-token:${CHATOPS_TOKEN}@github.com/${REPO}.git"
 
       # -------------------------------
       # /bootstrap-ci -> create CI, pre-commit, Dependabot, auto-merge; open PR
       # -------------------------------
-      - name: Bootstrap CI (create files & PR)
+      - name: Bootstrap CI (create files & PR branch)
         if: contains(env.COMMENT_BODY, '/bootstrap-ci')
         run: |
           set -euo pipefail
@@ -161,7 +162,6 @@ jobs:
                 interval: "weekly"
           YAML
 
-          # No "token:" line to avoid any chance of token material landing in commits
           cat > .github/workflows/auto-merge-dependabot.yml <<'YAML'
           name: Auto-merge Dependabot
           on:
@@ -185,7 +185,7 @@ jobs:
                     merge-method: squash
           YAML
 
-          # Create or reset the branch safely, commit defensively, push with workflow token
+          # Create or reset the branch safely, commit defensively, push with PAT
           git switch -C bot/bootstrap-ci
           git add -A
           if git diff --cached --quiet; then
@@ -199,7 +199,7 @@ jobs:
         if: contains(env.COMMENT_BODY, '/bootstrap-ci')
         uses: peter-evans/create-pull-request@v6
         with:
-          token: ${{ github.token }}   # use GITHUB_TOKEN to open the PR
+          token: ${{ github.token }}   # safe to use GITHUB_TOKEN for opening PRs
           base: ${{ env.DEFAULT_BRANCH }}
           branch: bot/bootstrap-ci
           title: "ci: register 'Smoke' & 'Repo Health'; add pre-commit + Dependabot"
@@ -244,39 +244,49 @@ jobs:
             }
 
       # -------------------------------
-      # /open-test-pr -> tiny PR to prove gating
+      # /open-test-pr -> tiny PR to prove gating (idempotent)
       # -------------------------------
-      - name: Open test PR (branch + commit)
+      - name: Prepare bot/test-pr from origin/main (always reset)
         if: contains(env.COMMENT_BODY, '/open-test-pr')
         run: |
           set -eo pipefail
-          git config user.name  "milkbox-ai-bot"
-          git config user.email "actions@users.noreply.github.com"
-
-          # Work from the exact tip of the remote default branch
           git fetch origin --prune
-          git switch --detach "origin/${DEFAULT_BRANCH}"
-          git branch -D bot/test-pr 2>/dev/null || true
-          git switch -c bot/test-pr
+          git checkout -B bot/test-pr "origin/${DEFAULT_BRANCH}"
 
-          date > .ci_proof
-          git add .ci_proof
-          git commit -m "chore: trigger CI to prove required checks" || true
+          mkdir -p .github
+          echo "Refreshed: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" > .github/test-pr.txt
+          git add .github/test-pr.txt
+          # Allow empty commit if the timestamp happens to match (rare)
+          git commit -m "chore(test-pr): refresh automated test PR" || true
 
-          # If the remote branch exists, delete it first to avoid 'stale info' rejects
-          if git ls-remote --exit-code --heads origin bot/test-pr >/dev/null 2>&1; then
-            git push origin :bot/test-pr
+      - name: Best-effort remove remote ref first (avoids stale refs)
+        if: contains(env.COMMENT_BODY, '/open-test-pr')
+        env:
+          GH_TOKEN: ${{ env.CHATOPS_TOKEN }}
+        run: |
+          gh api --method DELETE repos/${REPO}/git/refs/heads/bot/test-pr || true
+
+      - name: Push branch (force-with-lease; retry once)
+        if: contains(env.COMMENT_BODY, '/open-test-pr')
+        run: |
+          set -e
+          git fetch origin --prune
+          if ! git push --force-with-lease origin HEAD:bot/test-pr; then
+            echo "Lease changed; refetching and retrying..."
+            git fetch origin --prune
+            git push --force-with-lease origin HEAD:bot/test-pr
           fi
 
-          # Fresh push and set upstream
-          git push -u origin bot/test-pr
-
-      - name: Create PR (test)
+      - name: Create or update PR pointing to main
         if: contains(env.COMMENT_BODY, '/open-test-pr')
-        uses: peter-evans/create-pull-request@v6
-        with:
-          token: ${{ github.token }}
-          base: ${{ env.DEFAULT_BRANCH }}
-          branch: bot/test-pr
-          title: "chore: CI proof PR"
-          body: "No-op change to trigger **Smoke** & **Repo Health** and prove required checks gate merges."
+        env:
+          GH_TOKEN: ${{ env.CHATOPS_TOKEN }}
+        run: |
+          set -e
+          num=$(gh pr list --head bot/test-pr --json number -q '.[0].number' || true)
+          if [ -n "$num" ]; then
+            gh pr edit "$num" --title "Test PR (bot)" --body "Automated test PR refreshed by ChatOps."
+            echo "Updated existing PR #$num"
+          else
+            gh pr create --title "Test PR (bot)" --body "Automated test PR from ChatOps." --base "${DEFAULT_BRANCH}" --head bot/test-pr
+          fi
