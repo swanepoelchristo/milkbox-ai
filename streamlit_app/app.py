@@ -81,9 +81,9 @@ def normalize_tools(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 # ─────────────────────────────────────────────────────────
-# Smart importer
+# Smart importer (v2)
 # ─────────────────────────────────────────────────────────
-CANDIDATE_FILES = [
+FIXED_CANDIDATES = [
     "__init__.py",
     "app.py",
     "main.py",
@@ -100,6 +100,35 @@ def _load_module_from_file(fully_qualified_name: str, file_path: Path) -> types.
     sys.modules[fully_qualified_name] = mod
     spec.loader.exec_module(mod)  # type: ignore[attr-defined]
     return mod
+
+
+def _all_py_files_sorted(pkg_dir: Path, name: str) -> List[Path]:
+    """
+    Return ALL .py files in the directory in a priority order:
+    - fixed candidates first (if present)
+    - then <name>.py
+    - then everything else alphabetically
+    """
+    seen: set[Path] = set()
+    ordered: List[Path] = []
+
+    # Fixed candidates
+    for fname in FIXED_CANDIDATES:
+        p = pkg_dir / fname
+        if p.exists() and p.suffix == ".py" and p not in seen:
+            ordered.append(p); seen.add(p)
+
+    # <name>.py
+    p = pkg_dir / f"{name}.py"
+    if p.exists() and p not in seen:
+        ordered.append(p); seen.add(p)
+
+    # Everything else *.py
+    for p in sorted(pkg_dir.glob("*.py")):
+        if p not in seen:
+            ordered.append(p); seen.add(p)
+
+    return ordered
 
 
 def smart_import(module_path: str) -> Tuple[Optional[types.ModuleType], List[Path]]:
@@ -136,17 +165,30 @@ def smart_import(module_path: str) -> Tuple[Optional[types.ModuleType], List[Pat
         except Exception:
             return None, tried
 
-    # b) tools/<name>/(candidates)
+    # b) tools/<name>/(candidates, then any .py)
     pkg_dir = TOOLS_DIR / name
     if pkg_dir.is_dir():
-        for fname in CANDIDATE_FILES + [f"{name}.py"]:
-            candidate = pkg_dir / fname
-            tried.append(candidate)
+        # Create a comprehensive candidate list to try and to show in errors
+        candidates: List[Path] = []
+        # show fixed + name.py (even if missing) so users see what we attempted
+        for fname in FIXED_CANDIDATES + [f"{name}.py"]:
+            candidates.append(pkg_dir / fname)
+        # and then any .py actually present
+        for p in _all_py_files_sorted(pkg_dir, name):
+            if p not in candidates:
+                candidates.append(p)
+
+        # record them all for the error message
+        tried.extend(candidates)
+
+        # attempt only the ones that actually exist
+        for candidate in candidates:
             if candidate.exists():
                 try:
                     return _load_module_from_file(module_path, candidate), tried
                 except Exception:
-                    return None, tried
+                    # try next candidate
+                    continue
 
     return None, tried
 
@@ -257,4 +299,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
