@@ -51,7 +51,7 @@ jobs:
           git remote set-url origin "https://x-access-token:${{ env.CHATOPS_TOKEN }}@github.com/${{ env.REPO }}.git"
 
       # -------------------------------
-      # /bootstrap-ci (same as before)
+      # /bootstrap-ci
       # -------------------------------
       - name: Bootstrap CI (create files & PR)
         if: contains(env.COMMENT_BODY, '/bootstrap-ci')
@@ -100,6 +100,7 @@ jobs:
                 - name: Run pre-commit
                   run: pre-commit run --all-files --show-diff-on-failure
           YAML
+
           cat > .pre-commit-config.yaml <<'YAML'
           repos:
             - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -121,6 +122,7 @@ jobs:
               hooks:
                 - id: prettier
           YAML
+
           mkdir -p .github
           cat > .github/dependabot.yml <<'YAML'
           version: 2
@@ -132,6 +134,7 @@ jobs:
               directory: "/"
               schedule: { interval: "weekly" }
           YAML
+
           git switch -C bot/bootstrap-ci
           git add -A
           if git diff --cached --quiet; then
@@ -152,7 +155,7 @@ jobs:
           body: "Opened by ChatOps."
 
       # -------------------------------
-      # /set-required-checks (same names)
+      # /set-required-checks
       # -------------------------------
       - name: Set branch protection (main)
         if: contains(env.COMMENT_BODY, '/set-required-checks')
@@ -175,7 +178,7 @@ jobs:
             });
 
       # -------------------------------
-      # /open-test-pr (reuse single PR)
+      # /open-test-pr  (re-use single PR)
       # -------------------------------
       - name: Prepare bot/test-pr from origin/main (always reset)
         if: contains(env.COMMENT_BODY, '/open-test-pr')
@@ -216,14 +219,15 @@ jobs:
         with:
           github-token: ${{ github.token }}
           script: |
-            await github.issues.createComment({
-              ...context.repo,
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
               issue_number: context.payload.issue.number,
-              body: `✅ Updated/created **PR #${{ steps.pr.outputs.pull-request-number }}** to trigger checks.`
+              body: `✅ Updated/created **PR #${{ steps.pr.outputs['pull-request-number'] }}** to trigger checks.`
             });
 
       # -------------------------------
-      # /house-diagnose (Streamlit)
+      # /house-diagnose  &  /house-fix
       # -------------------------------
       - name: Detect app entry
         id: entry
@@ -256,20 +260,20 @@ jobs:
           set -euo pipefail
           APP="${{ steps.entry.outputs.path }}"
           python - <<'PY' > house_diag.log 2>&1 || true
-          import os,runpy,traceback,sys
+          import os,runpy,traceback
           os.environ["STREAMLIT_SERVER_HEADLESS"]="true"
           missing=set(); other=False
           try:
-              import streamlit  # ensure installed
+              import streamlit
           except ModuleNotFoundError as e:
-              missing.add(e.name.split('.')[0])
+              missing.add((e.name or '').split('.')[0])
           path = "${{ steps.entry.outputs.path }}"
           if path:
               try:
                   runpy.run_path(path, run_name="__main__")
                   print("App executed without immediate exception")
               except ModuleNotFoundError as e:
-                  missing.add(e.name.split('.')[0])
+                  missing.add((e.name or '').split('.')[0])
                   traceback.print_exc()
               except Exception:
                   other=True
@@ -300,21 +304,19 @@ jobs:
             const fs = require('fs');
             const log = fs.existsSync('house_diag.log') ? fs.readFileSync('house_diag.log','utf8') : '';
             const tail = log.split('\n').slice(-80).join('\n');
-            const miss = `${{ steps.diag.outputs.missing }}` || '(none)';
-            await github.issues.createComment({
-              ...context.repo,
-              issue_number: ${{ env.ISSUE_NUMBER }},
+            const miss = ('${{ steps.diag.outputs.missing }}' || '').trim() || '(none)';
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: Number(process.env.ISSUE_NUMBER),
               body:
                 `**House Diagnose**\n\n` +
-                `- Entry: \`${{ steps.entry.outputs.path || 'not-found (import-only)' }}\`\n` +
+                `- Entry: \`${'${{ steps.entry.outputs.path }}' || 'not-found (import-only)'}\`\n` +
                 `- Missing packages: \`${miss}\`\n\n` +
                 `Log tail:\n\`\`\`\n${tail}\n\`\`\`\n` +
                 `Full log attached as artifact **house_diag.log**.`
             });
 
-      # -------------------------------
-      # /house-fix  → add missing pkgs to requirements.txt and open PR
-      # -------------------------------
       - name: Prepare fix change
         if: contains(env.COMMENT_BODY, '/house-fix')
         run: |
@@ -327,7 +329,6 @@ jobs:
           touch requirements.txt
           cp requirements.txt requirements.txt.bak
           for PKG in ${MISS//,/ }; do
-            # add if not already present (rough check)
             if ! grep -i -q "^${PKG}\b" requirements.txt; then
               echo "$PKG" >> requirements.txt
             fi
@@ -360,9 +361,11 @@ jobs:
         with:
           github-token: ${{ github.token }}
           script: |
-            const num = `${{ steps.fixpr.outputs.pull-request-number }}` || '(no changes)';
-            await github.issues.createComment({
-              ...context.repo,
-              issue_number: ${{ env.ISSUE_NUMBER }},
-              body: `🔧 Fix PR: **#${num}** (if "(no changes)", nothing to fix was detected).`
-            })
+            const prNum = ('${{ steps.fixpr.outputs.pull-request-number }}' || '').trim() || '(no changes)';
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: Number(process.env.ISSUE_NUMBER),
+              body: `🔧 Fix PR: **#${prNum}** (if "(no changes)", nothing to fix was detected).`
+            });
+
