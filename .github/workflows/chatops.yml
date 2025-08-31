@@ -38,17 +38,12 @@ jobs:
         with:
           ref: ${{ env.DEFAULT_BRANCH }}
 
-      - name: Force origin to use GITHUB_TOKEN
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
+      - name: Force origin to use default token
         run: |
-          set -euo pipefail
           git config user.name  "milkbox-ai-bot"
           git config user.email "actions@users.noreply.github.com"
-          # Ensure all pushes use the workflow’s token (not your PAT)
-          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
-          git config --get remote.origin.url
+          # Use the workflow’s token directly in the URL (no $GITHUB_TOKEN env var)
+          git remote set-url origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
 
       # -------------------------------
       # /bootstrap-ci -> create CI, pre-commit, Dependabot, auto-merge; open PR
