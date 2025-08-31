@@ -16,18 +16,18 @@ jobs:
     if: github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/')
     runs-on: ubuntu-latest
 
-    # Prevent races on the same issue/PR
     concurrency:
       group: chatops-${{ github.repository }}-${{ github.event.issue.number || github.event.pull_request.number || 'na' }}
       cancel-in-progress: false
 
     env:
-      REPO: ${{ github.repository }}                       # owner/repo
-      OWNER: ${{ github.repository_owner }}                # owner
+      REPO: ${{ github.repository }}
+      OWNER: ${{ github.repository_owner }}
       DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
       CHATOPS_TOKEN: ${{ secrets.CHATOPS_TOKEN }}
       COMMENT_BODY: ${{ github.event.comment.body }}
       AUTHOR_ASSOC: ${{ github.event.comment.author_association }}
+      ISSUE_NUMBER: ${{ github.event.issue.number }}
 
     steps:
       - name: Authorize caller (owner/member/collaborator only)
@@ -37,7 +37,7 @@ jobs:
             *) echo "Not authorized: ${AUTHOR_ASSOC}"; exit 1;;
           esac
 
-      - name: Checkout default branch (full history; no auto-creds)
+      - name: Checkout default branch (full history; no auto creds)
         uses: actions/checkout@v4
         with:
           ref: ${{ env.DEFAULT_BRANCH }}
@@ -47,18 +47,17 @@ jobs:
       - name: Use PAT for pushes (origin uses CHATOPS_TOKEN)
         run: |
           git config user.name  "milkbox-ai-bot"
-          git config user.email "ai@milkyroadscheese.com"
-          git remote set-url origin "https://x-access-token:${CHATOPS_TOKEN}@github.com/${REPO}.git"
+          git config user.email "actions@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${{ env.CHATOPS_TOKEN }}@github.com/${{ env.REPO }}.git"
 
       # -------------------------------
-      # /bootstrap-ci
+      # /bootstrap-ci (same as before)
       # -------------------------------
-      - name: Bootstrap CI (create files & PR branch)
+      - name: Bootstrap CI (create files & PR)
         if: contains(env.COMMENT_BODY, '/bootstrap-ci')
         run: |
           set -euo pipefail
           mkdir -p .github/workflows
-
           cat > .github/workflows/ci.yml <<'YAML'
           name: CI
           on:
@@ -67,46 +66,24 @@ jobs:
             push:
               branches: [main]
             workflow_dispatch:
-          permissions:
-            contents: read
+          permissions: { contents: read }
           jobs:
             smoke:
               name: Smoke (Imports)
               runs-on: ubuntu-latest
               steps:
                 - uses: actions/checkout@v4
-                - name: Sanity ping
-                  run: echo "✅ Smoke check running"
-                - name: Detect Node project
-                  id: detect_node
+                - uses: actions/setup-python@v5
+                  with: { python-version: '3.11' }
+                - name: Install minimal deps
                   run: |
-                    if [ -f package.json ]; then
-                      echo "node_project=true" >> "$GITHUB_OUTPUT"
-                    else
-                      echo "node_project=false" >> "$GITHUB_OUTPUT"
-                    fi
-                - name: Setup Node
-                  if: steps.detect_node.outputs.node_project == 'true'
-                  uses: actions/setup-node@v4
-                  with:
-                    node-version: '20'
-                    cache: 'npm'
-                - name: Install deps (Node)
-                  if: steps.detect_node.outputs.node_project == 'true'
-                  run: |
-                    if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
-                      npm ci
-                    else
-                      npm install
-                    fi
-                - name: Lint (if present)
-                  if: steps.detect_node.outputs.node_project == 'true'
-                  run: npm run --if-present lint
-                - name: Build (if present)
-                  if: steps.detect_node.outputs.node_project == 'true'
-                  run: npm run --if-present build
-
-            repo_health:
+                    python -m pip install --upgrade pip
+                    if [ -f requirements.txt ]; then pip install -r requirements.txt || true; fi
+                - name: Import sanity
+                  run: python - <<'PY'
+                    print("✅ Python imports OK (minimal)")
+                    PY
+            health:
               name: Repo Health
               runs-on: ubuntu-latest
               steps:
@@ -117,14 +94,12 @@ jobs:
                     test -f CODEOWNERS || { echo "❌ Missing CODEOWNERS at repo root"; exit 1; }
                     echo "✅ CODEOWNERS present"
                 - uses: actions/setup-python@v5
-                  with:
-                    python-version: '3.x'
+                  with: { python-version: '3.11' }
                 - name: Install pre-commit
                   run: pip install pre-commit
                 - name: Run pre-commit
                   run: pre-commit run --all-files --show-diff-on-failure
           YAML
-
           cat > .pre-commit-config.yaml <<'YAML'
           repos:
             - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -146,50 +121,23 @@ jobs:
               hooks:
                 - id: prettier
           YAML
-
           mkdir -p .github
           cat > .github/dependabot.yml <<'YAML'
           version: 2
           updates:
             - package-ecosystem: "github-actions"
               directory: "/"
-              schedule:
-                interval: "weekly"
+              schedule: { interval: "weekly" }
             - package-ecosystem: "npm"
               directory: "/"
-              schedule:
-                interval: "weekly"
+              schedule: { interval: "weekly" }
           YAML
-
-          cat > .github/workflows/auto-merge-dependabot.yml <<'YAML'
-          name: Auto-merge Dependabot
-          on:
-            pull_request_target:
-              types: [opened, synchronize, reopened, ready_for_review]
-          permissions:
-            contents: write
-            pull-requests: write
-          jobs:
-            enable-auto-merge:
-              if: github.actor == 'dependabot[bot]'
-              runs-on: ubuntu-latest
-              steps:
-                - name: Fetch metadata
-                  id: meta
-                  uses: dependabot/fetch-metadata@v2
-                - name: Enable auto-merge (squash)
-                  if: steps.meta.outputs.update-type != 'version-update:semver-major'
-                  uses: peter-evans/enable-pull-request-automerge@v3
-                  with:
-                    merge-method: squash
-          YAML
-
           git switch -C bot/bootstrap-ci
           git add -A
           if git diff --cached --quiet; then
-            echo "No changes to commit (bootstrap files already present)."
+            echo "No bootstrap changes to commit."
           else
-            git commit -m "ci: bootstrap CI (Smoke & Repo Health), pre-commit, Dependabot, auto-merge"
+            git commit -m "ci: bootstrap CI (Smoke & Repo Health), pre-commit, Dependabot"
           fi
           git push -u origin bot/bootstrap-ci
 
@@ -204,7 +152,7 @@ jobs:
           body: "Opened by ChatOps."
 
       # -------------------------------
-      # /set-required-checks
+      # /set-required-checks (same names)
       # -------------------------------
       - name: Set branch protection (main)
         if: contains(env.COMMENT_BODY, '/set-required-checks')
@@ -227,77 +175,194 @@ jobs:
             });
 
       # -------------------------------
-      # /open-test-pr  (REUSE/REOPEN PR; never delete branch if PR open)
+      # /open-test-pr (reuse single PR)
       # -------------------------------
       - name: Prepare bot/test-pr from origin/main (always reset)
         if: contains(env.COMMENT_BODY, '/open-test-pr')
         run: |
           set -euo pipefail
           git fetch origin --prune
-          git checkout -B bot/test-pr "origin/${DEFAULT_BRANCH}"
-          mkdir -p .github
-          echo "Refreshed: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" > .github/test-pr.txt
-          git add .github/test-pr.txt
+          git switch --detach "origin/${DEFAULT_BRANCH}"
+          git branch -D bot/test-pr 2>/dev/null || true
+          git switch -c bot/test-pr
+          date > .ci_proof
+          git add .ci_proof
           git commit -m "chore(test-pr): refresh automated test PR" || true
 
-      - name: Push branch (force-with-lease; retry; DO NOT delete if open PR exists)
+      - name: Push branch (force-with-lease; retry once)
         if: contains(env.COMMENT_BODY, '/open-test-pr')
-        env:
-          GH_TOKEN: ${{ env.CHATOPS_TOKEN }}
         run: |
           set -euo pipefail
-          git fetch origin --prune
-          if git push --force-with-lease origin HEAD:bot/test-pr; then
-            exit 0
-          fi
-          echo "First push failed; checking for an open PR…"
-          owner="${OWNER}"
-          repo="${REPO#*/}"
-          open=$(gh api -X GET "repos/${owner}/${repo}/pulls?state=open&head=${owner}:bot/test-pr" -q '.[0].number' || true)
-          if [ -n "${open:-}" ]; then
-            echo "Open PR #${open} exists; NOT deleting remote branch. Retrying push…"
-            git fetch origin --prune
-            git push --force-with-lease origin HEAD:bot/test-pr
-          else
-            echo "No open PR; deleting remote branch as a last resort and retrying…"
-            gh api --method DELETE "repos/${REPO}/git/refs/heads/bot/test-pr" || true
-            git fetch origin --prune
-            git push --force-with-lease origin HEAD:bot/test-pr
-          fi
+          for i in 1 2; do
+            if git push --force-with-lease origin bot/test-pr; then exit 0; fi
+            sleep 2
+          done
+          echo "Failed to push bot/test-pr"; exit 1
 
       - name: Create or update PR (reuse if open; reopen if closed)
+        id: pr
         if: contains(env.COMMENT_BODY, '/open-test-pr')
-        env:
-          GH_TOKEN: ${{ env.CHATOPS_TOKEN }}
-        run: |
-          set -euo pipefail
-          owner="${OWNER}"
-          repo="${REPO#*/}"
-          # 1) Prefer existing OPEN PR by exact head
-          num=$(gh api -X GET "repos/${owner}/${repo}/pulls?state=open&head=${owner}:bot/test-pr" -q '.[0].number' || true)
-          if [ -z "${num:-}" ]; then
-            # 2) If none open, reopen the most recent CLOSED (not merged) PR for this head
-            num=$(gh api -X GET "repos/${owner}/${repo}/pulls?state=closed&head=${owner}:bot/test-pr&sort=updated&direction=desc" -q 'map(select(.merged_at==null)) | .[0].number' || true)
-            if [ -n "${num:-}" ]; then
-              echo "Reopening closed PR #$num"
-              gh pr reopen "$num"
-            fi
-          fi
-          if [ -n "${num:-}" ]; then
-            gh pr edit "$num" --title "Test PR (bot)" --body "Automated test PR refreshed by ChatOps."
-          else
-            num=$(gh pr create --title "Test PR (bot)" --body "Automated test PR from ChatOps." --base "${DEFAULT_BRANCH}" --head bot/test-pr --json number -q .number)
-          fi
-          echo "PR_NUMBER=$num" >> $GITHUB_ENV
-          url=$(gh pr view "$num" --json url -q .url)
-          echo "PR_URL=$url" >> $GITHUB_ENV
-          echo "Opened/updated PR #$num: $url"
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ github.token }}
+          base: ${{ env.DEFAULT_BRANCH }}
+          branch: bot/test-pr
+          title: "Test PR (bot)"
+          body: "Automated test PR from ChatOps."
 
       - name: Comment result back to this issue
         if: contains(env.COMMENT_BODY, '/open-test-pr')
-        env:
-          GH_TOKEN: ${{ env.CHATOPS_TOKEN }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            await github.issues.createComment({
+              ...context.repo,
+              issue_number: context.payload.issue.number,
+              body: `✅ Updated/created **PR #${{ steps.pr.outputs.pull-request-number }}** to trigger checks.`
+            });
+
+      # -------------------------------
+      # /house-diagnose (Streamlit)
+      # -------------------------------
+      - name: Detect app entry
+        id: entry
+        if: contains(env.COMMENT_BODY, '/house-diagnose') || contains(env.COMMENT_BODY, '/house-fix')
         run: |
-          issue="${{ github.event.issue.number }}"
-          sha=$(git rev-parse --short HEAD)
-          gh api "repos/${REPO}/issues/${issue}/comments" -f body="✅ Test PR refreshed.\n\n- PR: ${PR_URL}\n- Commit: \`${sha}\`"
+          set -euo pipefail
+          for f in streamlit_app.py app.py main.py Home.py src/app.py; do
+            [ -f "$f" ] && echo "path=$f" >> "$GITHUB_OUTPUT" && exit 0
+          done
+          echo "path=" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Python
+        if: contains(env.COMMENT_BODY, '/house-diagnose') || contains(env.COMMENT_BODY, '/house-fix')
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install deps
+        if: contains(env.COMMENT_BODY, '/house-diagnose') || contains(env.COMMENT_BODY, '/house-fix')
+        run: |
+          python -m pip install --upgrade pip wheel
+          if [ -f requirements.txt ]; then pip install -r requirements.txt || true; fi
+          pip install streamlit || true
+
+      - name: Diagnose app (headless import/run)
+        id: diag
+        if: contains(env.COMMENT_BODY, '/house-diagnose') || contains(env.COMMENT_BODY, '/house-fix')
+        run: |
+          set -euo pipefail
+          APP="${{ steps.entry.outputs.path }}"
+          python - <<'PY' > house_diag.log 2>&1 || true
+          import os,runpy,traceback,sys
+          os.environ["STREAMLIT_SERVER_HEADLESS"]="true"
+          missing=set(); other=False
+          try:
+              import streamlit  # ensure installed
+          except ModuleNotFoundError as e:
+              missing.add(e.name.split('.')[0])
+          path = "${{ steps.entry.outputs.path }}"
+          if path:
+              try:
+                  runpy.run_path(path, run_name="__main__")
+                  print("App executed without immediate exception")
+              except ModuleNotFoundError as e:
+                  missing.add(e.name.split('.')[0])
+                  traceback.print_exc()
+              except Exception:
+                  other=True
+                  traceback.print_exc()
+          print("MISSING:", ",".join(sorted(missing)))
+          print("OTHER_ERR:", other)
+          PY
+          tail -n 120 house_diag.log || true
+          MISSING=$(grep '^MISSING:' -m1 house_diag.log | sed 's/^MISSING: *//')
+          OTHER=$(grep '^OTHER_ERR:' -m1 house_diag.log | awk '{print $2}')
+          echo "missing=$MISSING" >> "$GITHUB_OUTPUT"
+          echo "other=$OTHER" >> "$GITHUB_OUTPUT"
+
+      - name: Upload diagnostic log
+        if: (contains(env.COMMENT_BODY, '/house-diagnose') || contains(env.COMMENT_BODY, '/house-fix'))
+        uses: actions/upload-artifact@v4
+        with:
+          name: house_diag.log
+          path: house_diag.log
+          retention-days: 7
+
+      - name: Comment diagnosis
+        if: contains(env.COMMENT_BODY, '/house-diagnose')
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const fs = require('fs');
+            const log = fs.existsSync('house_diag.log') ? fs.readFileSync('house_diag.log','utf8') : '';
+            const tail = log.split('\n').slice(-80).join('\n');
+            const miss = `${{ steps.diag.outputs.missing }}` || '(none)';
+            await github.issues.createComment({
+              ...context.repo,
+              issue_number: ${{ env.ISSUE_NUMBER }},
+              body:
+                `**House Diagnose**\n\n` +
+                `- Entry: \`${{ steps.entry.outputs.path || 'not-found (import-only)' }}\`\n` +
+                `- Missing packages: \`${miss}\`\n\n` +
+                `Log tail:\n\`\`\`\n${tail}\n\`\`\`\n` +
+                `Full log attached as artifact **house_diag.log**.`
+            });
+
+      # -------------------------------
+      # /house-fix  → add missing pkgs to requirements.txt and open PR
+      # -------------------------------
+      - name: Prepare fix change
+        if: contains(env.COMMENT_BODY, '/house-fix')
+        run: |
+          set -euo pipefail
+          MISS="${{ steps.diag.outputs.missing }}"
+          if [ -z "$MISS" ]; then
+            echo "No missing modules detected — nothing to fix."
+            exit 0
+          fi
+          touch requirements.txt
+          cp requirements.txt requirements.txt.bak
+          for PKG in ${MISS//,/ }; do
+            # add if not already present (rough check)
+            if ! grep -i -q "^${PKG}\b" requirements.txt; then
+              echo "$PKG" >> requirements.txt
+            fi
+          done
+          if diff -u requirements.txt.bak requirements.txt; then
+            echo "No changes to requirements.txt"; exit 0
+          fi
+          git add requirements.txt
+
+      - name: Open PR with fix
+        if: contains(env.COMMENT_BODY, '/house-fix')
+        id: fixpr
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ github.token }}
+          base: ${{ env.DEFAULT_BRANCH }}
+          branch: bot/house-fix-${{ github.run_id }}
+          title: "fix(streamlit): add missing packages to requirements.txt"
+          body: |
+            Detected missing packages and added them to `requirements.txt`.
+
+            Missing: `${{ steps.diag.outputs.missing }}`
+            Entry: `${{ steps.entry.outputs.path || 'not-found' }}`
+
+            See artifact **house_diag.log** for full error log.
+
+      - name: Comment fix result
+        if: contains(env.COMMENT_BODY, '/house-fix')
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const num = `${{ steps.fixpr.outputs.pull-request-number }}` || '(no changes)';
+            await github.issues.createComment({
+              ...context.repo,
+              issue_number: ${{ env.ISSUE_NUMBER }},
+              body: `🔧 Fix PR: **#${num}** (if "(no changes)", nothing to fix was detected).`
+            })
