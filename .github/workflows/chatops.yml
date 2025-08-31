@@ -16,11 +16,12 @@ jobs:
     # Only react to slash commands in comments
     if: github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/')
     runs-on: ubuntu-latest
+
     env:
       REPO: ${{ github.repository }}
       OWNER: ${{ github.repository_owner }}
       DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-      CHATOPS_TOKEN: ${{ secrets.CHATOPS_TOKEN }}
+      CHATOPS_TOKEN: ${{ secrets.CHATOPS_TOKEN }}   # PAT with repo admin perms (for branch protection only)
       COMMENT_BODY: ${{ github.event.comment.body }}
       AUTHOR_ASSOC: ${{ github.event.comment.author_association }}
 
@@ -38,12 +39,16 @@ jobs:
           ref: ${{ env.DEFAULT_BRANCH }}
 
       - name: Force origin to use GITHUB_TOKEN
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           git config user.name  "milkbox-ai-bot"
           git config user.email "actions@users.noreply.github.com"
-          # Ensure all pushes use the workflow's GITHUB_TOKEN, never your PAT
-          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          # Ensure all pushes use the workflow’s token (not your PAT)
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          git config --get remote.origin.url
 
       # -------------------------------
       # /bootstrap-ci -> create CI, pre-commit, Dependabot, auto-merge; open PR
@@ -156,7 +161,7 @@ jobs:
                 interval: "weekly"
           YAML
 
-          # No explicit token here to avoid push-protection false positives
+          # No "token:" line to avoid any chance of token material landing in commits
           cat > .github/workflows/auto-merge-dependabot.yml <<'YAML'
           name: Auto-merge Dependabot
           on:
@@ -180,24 +185,34 @@ jobs:
                     merge-method: squash
           YAML
 
-          git checkout -b bot/bootstrap-ci
-          git add .
-          git commit -m "ci: bootstrap CI (Smoke & Repo Health), pre-commit, Dependabot, auto-merge"
+          # Create or reset the branch safely, commit defensively, push with workflow token
+          git switch -C bot/bootstrap-ci
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to commit (bootstrap files already present)."
+          else
+            git commit -m "ci: bootstrap CI (Smoke & Repo Health), pre-commit, Dependabot, auto-merge"
+          fi
           git push -u origin bot/bootstrap-ci
 
       - name: Open PR for bootstrap
         if: contains(env.COMMENT_BODY, '/bootstrap-ci')
         uses: peter-evans/create-pull-request@v6
         with:
-          token: ${{ github.token }}   # GITHUB_TOKEN opens the PR
+          token: ${{ github.token }}   # use GITHUB_TOKEN to open the PR
+          base: ${{ env.DEFAULT_BRANCH }}
           branch: bot/bootstrap-ci
           title: "ci: register 'Smoke' & 'Repo Health'; add pre-commit + Dependabot"
           body: |
-            - Adds named checks **Smoke** and **Repo Health**
-            - Adds `.pre-commit-config.yaml`
-            - Adds Dependabot (actions + npm)
-            - Adds auto-merge for Dependabot (non-major)
-            Merge this, then set them as required checks.
+            This PR was opened by **ChatOps**.
+
+            **Adds**
+            - Named checks: **Smoke** and **Repo Health**
+            - `.pre-commit-config.yaml`
+            - Dependabot (actions + npm)
+            - Auto-merge for Dependabot (non-major)
+
+            Merge this first, then run `/set-required-checks` in the **Ops Console** issue.
 
       # -------------------------------
       # /set-required-checks -> branch protection on main
@@ -206,21 +221,27 @@ jobs:
         if: contains(env.COMMENT_BODY, '/set-required-checks')
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.CHATOPS_TOKEN }}   # PAT still required for admin API
+          github-token: ${{ env.CHATOPS_TOKEN }}   # PAT must have repo admin perms
           script: |
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
+            const owner  = context.repo.owner;
+            const repo   = context.repo.repo;
             const branch = context.payload.repository.default_branch || 'main';
-            await github.request('PUT /repos/{owner}/{repo}/branches/{branch}/protection', {
-              owner, repo, branch,
-              required_status_checks: {
-                strict: true,
-                contexts: ['Smoke','Repo Health'],
-              },
-              enforce_admins: false,
-              required_pull_request_reviews: { required_approving_review_count: 1 },
-              restrictions: null
-            });
+
+            try {
+              await github.request('PUT /repos/{owner}/{repo}/branches/{branch}/protection', {
+                owner, repo, branch,
+                required_status_checks: {
+                  strict: true,
+                  contexts: ['Smoke','Repo Health'],
+                },
+                enforce_admins: false,
+                required_pull_request_reviews: { required_approving_review_count: 1 },
+                restrictions: null
+              });
+              core.info(`Branch protection updated on ${branch}`);
+            } catch (e) {
+              core.setFailed(`Failed to set branch protection: ${e.message}`);
+            }
 
       # -------------------------------
       # /open-test-pr -> tiny PR to prove gating
@@ -229,19 +250,20 @@ jobs:
         if: contains(env.COMMENT_BODY, '/open-test-pr')
         run: |
           set -euo pipefail
-          git config user.name "milkbox-ai-bot"
+          git config user.name  "milkbox-ai-bot"
           git config user.email "actions@users.noreply.github.com"
-          git checkout -b bot/test-pr
+          git switch -C bot/test-pr
           date > .ci_proof
           git add .ci_proof
-          git commit -m "chore: trigger CI to prove required checks"
-          git push -u origin bot/test-pr
+          git commit -m "chore: trigger CI to prove required checks" || true
+          git push -u origin bot/test-pr --force-with-lease
 
       - name: Create PR (test)
         if: contains(env.COMMENT_BODY, '/open-test-pr')
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ github.token }}
+          base: ${{ env.DEFAULT_BRANCH }}
           branch: bot/test-pr
           title: "chore: CI proof PR"
-          body: "No-op change to trigger **Smoke** & **Repo Health**."
+          body: "No-op change to trigger **Smoke** & **Repo Health** and prove required checks gate merges."
