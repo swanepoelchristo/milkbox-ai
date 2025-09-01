@@ -21,6 +21,6 @@ jobs:
           python -m pip install --upgrade pip streamlit pyyaml
       - name: Run smoke for hello
         env:
-          TOOLS_FILTER: hello
+          TOOLS_FILTER: hello,notes
         run: |
           python scripts/smoke_tools.py
