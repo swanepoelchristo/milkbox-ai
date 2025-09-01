@@ -16,3 +16,4 @@ Prototype Streamlit app for Milkbox AI.
 ```bash
 pip install -r streamlit_app/requirements.txt  
 streamlit run streamlit_app/app.py
+<!-- trigger repo health -->
