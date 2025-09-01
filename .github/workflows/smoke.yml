@@ -1,59 +1,41 @@
-name: Smoke (Imports)
+from __future__ import annotations
+import os, sys, importlib
+from pathlib import Path
+import yaml
 
-on:
-  pull_request:
-    branches: [ main ]
-  push:
-    branches: [ main ]
-  workflow_dispatch:
-    inputs:
-      python-version:
-        description: 'Python version to use'
-        required: false
-        default: '3.11'
-      packages:
-        description: 'Comma-separated modules to import (override auto-discovery)'
-        required: false
-        default: ''
+ROOT = Path(__file__).resolve().parents[1]
+APP = ROOT / "streamlit_app"
+TOOLS_FILE = ROOT / "tools.yaml"
 
-concurrency:
-  group: smoke-${{ github.ref }}
-  cancel-in-progress: true
+if str(APP) not in sys.path:
+    sys.path.insert(0, str(APP))
 
-permissions:
-  contents: read
+def main():
+    data = yaml.safe_load(TOOLS_FILE.read_text()) or {}
+    tools = data.get("tools", [])
 
-jobs:
-  smoke:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    filter_raw = os.environ.get("TOOLS_FILTER", "").strip()
+    filter_keys = set(k.strip() for k in filter_raw.split(",")) if filter_raw else None
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ github.event.inputs.python-version || '3.11' }}
+    bad = []
+    for t in tools:
+        key = t.get("key")
+        if filter_keys and key not in filter_keys:
+            continue
+        mod = t.get("module")
+        try:
+            m = importlib.import_module(mod)
+            if not hasattr(m, "render"):
+                raise RuntimeError("module has no render()")
+            print(f"OK  {key:20}  {mod}")
+        except Exception as e:
+            print(f"BAD {key:20}  {mod}  -> {e}")
+            bad.append((key, mod, repr(e)))
+    if bad:
+        print("\nFAILED tools:")
+        for k, m, e in bad:
+            print(f" - {k} / {m}: {e}")
+        raise SystemExit(1)
 
-      - name: Install project (best-effort)
-        run: |
-          set -e
-          python -m pip install --upgrade pip
-          if [ -f "pyproject.toml" ]; then
-            pip install -e .
-          elif [ -f "requirements.txt" ]; then
-            pip install -r requirements.txt
-          fi
-
-      - name: Add repo root and src to PYTHONPATH
-        run: |
-          echo "PYTHONPATH=$PYTHONPATH:$(pwd)" >> $GITHUB_ENV
-          if [ -d "src" ]; then
-            echo "PYTHONPATH=$PYTHONPATH:$(pwd)/src" >> $GITHUB_ENV
-          fi
-
-      - name: Run import smoke
-        env:
-          CI_SMOKE: "1"   # allows app code to skip heavy init if it wants to
-        run: |
-          python scripts/test_imports.py --allow-empty $([ -n "${{ github.event.inputs.packages }}" ] && echo "--packages ${{ github.event.inputs.packages }}")
+if __name__ == "__main__":
+    main()
