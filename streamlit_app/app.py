@@ -6,9 +6,29 @@ import importlib.util
 import sys
 from pathlib import Path
 import types
+import json  # ← added
 
 import streamlit as st
 import yaml
+
+
+# ─────────────────────────────────────────────────────────
+# Importer banner + build meta (visible proof of deploy)
+# (Safe even if .build-meta.json doesn't exist yet)
+# ─────────────────────────────────────────────────────────
+try:
+    st.sidebar.caption("Importer v2 active")
+    meta_path = Path(__file__).parent / ".build-meta.json"
+    sha = "unknown"
+    ts = "unknown"
+    if meta_path.exists():
+        meta = json.loads(meta_path.read_text())
+        sha = (meta.get("sha") or "unknown")[:7]
+        ts = meta.get("ts") or "unknown"
+    st.sidebar.caption(f"Build: {sha} @ {ts} UTC")
+except Exception:
+    # Don't let sidebar meta ever break the app
+    pass
 
 
 # ─────────────────────────────────────────────────────────

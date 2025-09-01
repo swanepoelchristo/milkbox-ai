@@ -2,58 +2,25 @@ name: Smoke (Imports)
 
 on:
   pull_request:
-    branches: [ main ]
+    branches: [ "main", "master" ]
   push:
-    branches: [ main ]
+    branches: [ "fix/tool-hello-canonicalize" ]
   workflow_dispatch:
-    inputs:
-      python-version:
-        description: 'Python version to use'
-        required: false
-        default: '3.11'
-      packages:
-        description: 'Comma-separated modules to import (override auto-discovery)'
-        required: false
-        default: ''
-
-concurrency:
-  group: smoke-${{ github.ref }}
-  cancel-in-progress: true
-
-permissions:
-  contents: read
 
 jobs:
   smoke:
+    name: smoke
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          python-version: ${{ github.event.inputs.python-version || '3.11' }}
-
-      - name: Install project (best-effort)
+          python-version: "3.11"
+      - name: Install Python deps
         run: |
-          set -e
-          python -m pip install --upgrade pip
-          if [ -f "pyproject.toml" ]; then
-            pip install -e .
-          elif [ -f "requirements.txt" ]; then
-            pip install -r requirements.txt
-          fi
-
-      - name: Add repo root and src to PYTHONPATH
-        run: |
-          echo "PYTHONPATH=$PYTHONPATH:$(pwd)" >> $GITHUB_ENV
-          if [ -d "src" ]; then
-            echo "PYTHONPATH=$PYTHONPATH:$(pwd)/src" >> $GITHUB_ENV
-          fi
-
-      - name: Run import smoke
+          python -m pip install --upgrade pip streamlit pyyaml
+      - name: Run smoke for hello
         env:
-          CI_SMOKE: "1"   # allows app code to skip heavy init if it wants to
+          TOOLS_FILTER: hello
         run: |
-          python scripts/test_imports.py --allow-empty $([ -n "${{ github.event.inputs.packages }}" ] && echo "--packages ${{ github.event.inputs.packages }}")
+          python scripts/smoke_tools.py
