@@ -2,10 +2,18 @@ name: Smoke (Imports)
 
 on:
   pull_request:
-    branches: [ "main", "master" ]
+    branches: [ main, master ]
   push:
-    branches: [ "fix/tool-hello-canonicalize" ]
-  workflow_dispatch:
+    branches:
+      - "fix/*"          # run smoke on any fix/* branch (e.g. fix/tools-notes-canonicalize)
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: smoke-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   smoke:
@@ -13,14 +21,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
       - name: Install Python deps
         run: |
-          python -m pip install --upgrade pip streamlit pyyaml
-      - name: Run smoke for hello
+          python -m pip install --upgrade pip pyyaml streamlit
+          if [ -f "pyproject.toml" ]; then
+            pip install -e .
+          elif [ -f "requirements.txt" ]; then
+            pip install -r requirements.txt
+          fi
+
+      - name: Smoke: import tools from tools.yaml & verify render()
         env:
-          TOOLS_FILTER: hello
+          TOOLS_FILTER: hello,notes
         run: |
           python scripts/smoke_tools.py
