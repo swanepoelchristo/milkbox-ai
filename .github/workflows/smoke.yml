@@ -1,41 +1,26 @@
-from __future__ import annotations
-import os, sys, importlib
-from pathlib import Path
-import yaml
+name: Smoke (Imports)
 
-ROOT = Path(__file__).resolve().parents[1]
-APP = ROOT / "streamlit_app"
-TOOLS_FILE = ROOT / "tools.yaml"
+on:
+  pull_request:
+    branches: [ "main", "master" ]
+  push:
+    branches: [ "fix/tool-hello-canonicalize" ]
+  workflow_dispatch:
 
-if str(APP) not in sys.path:
-    sys.path.insert(0, str(APP))
-
-def main():
-    data = yaml.safe_load(TOOLS_FILE.read_text()) or {}
-    tools = data.get("tools", [])
-
-    filter_raw = os.environ.get("TOOLS_FILTER", "").strip()
-    filter_keys = set(k.strip() for k in filter_raw.split(",")) if filter_raw else None
-
-    bad = []
-    for t in tools:
-        key = t.get("key")
-        if filter_keys and key not in filter_keys:
-            continue
-        mod = t.get("module")
-        try:
-            m = importlib.import_module(mod)
-            if not hasattr(m, "render"):
-                raise RuntimeError("module has no render()")
-            print(f"OK  {key:20}  {mod}")
-        except Exception as e:
-            print(f"BAD {key:20}  {mod}  -> {e}")
-            bad.append((key, mod, repr(e)))
-    if bad:
-        print("\nFAILED tools:")
-        for k, m, e in bad:
-            print(f" - {k} / {m}: {e}")
-        raise SystemExit(1)
-
-if __name__ == "__main__":
-    main()
+jobs:
+  smoke:
+    name: smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip pyyaml
+      - name: Run smoke for hello
+        env:
+          TOOLS_FILTER: hello
+        run: |
+          python scripts/smoke_tools.py
