@@ -1,7 +1,6 @@
-import math
 import streamlit as st
 
-DENSITY_ETHANOL_G_PER_ML = 0.789  # 0.789 g/ml @ ~20°C
+DENSITY_ETHANOL_G_PER_ML = 0.789  # ~20°C
 
 def fmt_money(x: float, currency: str = "$") -> str:
     try:
@@ -114,4 +113,3 @@ def render():
 if __name__ == "__main__":
     st.set_page_config(page_title="Bar Tools", page_icon="🍹", layout="centered")
     render()
-
