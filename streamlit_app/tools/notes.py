@@ -1,10 +1,11 @@
 import streamlit as st
 
 def render():
-    st.header("📝 Notes")
+    st.title("📝 Notes")
+    st.caption("First draft of notes. Build here.")
 
-    if "notes" not in st.session_state:
-        st.session_state.notes = ""
+    # ensure the key exists once
+    st.session_state.setdefault("notes", "")
 
     st.text_area(
         "Write your notes",
@@ -15,5 +16,3 @@ def render():
 
     if st.button("Save"):
         st.success("Saved in session (persists until the app restarts).")
-
-    st.caption("Tip: this simple demo stores notes in session_state.")

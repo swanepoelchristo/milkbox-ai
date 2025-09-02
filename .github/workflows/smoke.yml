@@ -2,25 +2,35 @@ name: Smoke (Imports)
 
 on:
   pull_request:
-    branches: [ "main", "master" ]
-  push:
-    branches: [ "fix/tool-hello-canonicalize" ]
+    paths:
+      - "tools.yaml"
+      - "scripts/smoke_tools.py"
+      - "streamlit_app/tools/**"
+      - ".github/workflows/smoke.yml"
   workflow_dispatch:
 
 jobs:
   smoke:
     name: smoke
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install Python deps
+          cache: "pip"
+
+      - name: Install minimal deps for smoke
         run: |
-          python -m pip install --upgrade pip streamlit pyyaml
-      - name: Run smoke for hello
-        env:
-          TOOLS_FILTER: hello
-        run: |
-          python scripts/smoke_tools.py
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install pyyaml
+          fi
+
+      - name: Run smoke
+        run: python scripts/smoke_tools.py

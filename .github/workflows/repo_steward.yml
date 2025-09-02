@@ -3,12 +3,12 @@ name: Repo Steward
 on:
   workflow_dispatch:
     inputs:
-      packages_override:
-        description: "Comma-separated modules to import (optional, e.g. streamlit_app)"
+      tools_filter:
+        description: "Comma-separated tool KEYS from tools.yaml (e.g. hello,notes) — optional"
         type: string
         default: ""
       strict:
-        description: "Treat warnings as failures in health report"
+        description: "Fail job when health has warnings"
         type: boolean
         default: false
   pull_request:
@@ -30,340 +30,64 @@ jobs:
   steward:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout with write perms
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Detect target branch
+      - name: Detect branch name
         id: branch
         run: |
-          if [ -n "${GITHUB_HEAD_REF}" ]; then
-            echo "name=${GITHUB_HEAD_REF}" >> $GITHUB_OUTPUT
+          if [ -n "$GITHUB_HEAD_REF" ]; then
+            echo "name=$GITHUB_HEAD_REF" >> "$GITHUB_OUTPUT"
           else
-            echo "name=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+            echo "name=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Ensure CI files (doctor core)
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p .github/workflows scripts
-
-          # --- smoke.yml ---
-          cat > .github/workflows/smoke.yml <<'YAML'
-name: Smoke (Imports)
-
-on:
-  pull_request:
-    branches: [ main ]
-  push:
-    branches: [ main ]
-  workflow_dispatch:
-    inputs:
-      python-version:
-        description: 'Python version to use'
-        required: false
-        default: '3.11'
-      packages:
-        description: 'Comma-separated modules to import (override auto-discovery)'
-        required: false
-        default: ''
-
-concurrency:
-  group: smoke-${{ github.ref }}
-  cancel-in-progress: true
-
-permissions:
-  contents: read
-
-jobs:
-  smoke:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ github.event.inputs.python-version || '3.11' }}
+          python-version: '3.11'
+
       - name: Install project (best-effort)
         run: |
-          set -e
           python -m pip install --upgrade pip
-          if [ -f "pyproject.toml" ]; then
+          if [ -f pyproject.toml ]; then
             pip install -e .
-          elif [ -f "requirements.txt" ]; then
+          elif [ -f requirements.txt ]; then
             pip install -r requirements.txt
           fi
+          # Ensure streamlit is available for tools that import it
+          python - <<'PY'
+          import importlib.util, subprocess, sys
+          if importlib.util.find_spec("streamlit") is None:
+              subprocess.check_call([sys.executable, "-m", "pip", "install", "streamlit"])
+          PY
+
       - name: Add repo root and src to PYTHONPATH
         run: |
-          echo "PYTHONPATH=$PYTHONPATH:$(pwd)" >> $GITHUB_ENV
+          echo "PYTHONPATH=${PYTHONPATH}:$(pwd)" >> "$GITHUB_ENV"
           if [ -d "src" ]; then
-            echo "PYTHONPATH=$PYTHONPATH:$(pwd)/src" >> $GITHUB_ENV
+            echo "PYTHONPATH=${PYTHONPATH}:$(pwd)/src" >> "$GITHUB_ENV"
           fi
-      - name: Run import smoke
+
+      - name: Run Smoke (Imports)
         env:
           CI_SMOKE: "1"
+          TOOLS_FILTER: ${{ inputs.tools_filter }}
         run: |
-          python scripts/test_imports.py --allow-empty $([ -n "${{ github.event.inputs.packages }}" ] && echo "--packages ${{ github.event.inputs.packages }}")
-YAML
-
-          # --- repo_health.yml ---
-          cat > .github/workflows/repo_health.yml <<'YAML'
-name: Repo Health
-
-on:
-  pull_request:
-    branches: [ main ]
-  push:
-    branches: [ main ]
-  schedule:
-    - cron: '17 5 * * 1'
-  workflow_dispatch:
-    inputs:
-      strict:
-        type: boolean
-        default: false
-        description: 'Fail the job when warnings are present'
-      update_issue:
-        type: boolean
-        default: true
-        description: 'Create/update the Repo Health issue'
-
-concurrency:
-  group: repo-health-${{ github.ref }}
-  cancel-in-progress: true
-
-permissions:
-  contents: read
-  issues: write
-
-jobs:
-  health:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Generate health report
-        id: report
-        run: |
-          set +e
-          python -m pip install --upgrade pip
-          python scripts/health_report.py --out health.md $([ "${{ github.event.inputs.strict }}" = "true" ] && echo "--strict")
-          code=$?
-          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
-          set -e
-      - name: Upload report artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: repo-health
-          path: health.md
-      - name: Add report to job summary
-        if: always()
-        run: |
-          echo "## Repo Health Report" >> "$GITHUB_STEP_SUMMARY"
-          cat health.md >> "$GITHUB_STEP_SUMMARY"
-      - name: Create or update 'Repo Health' issue
-        if: ${{ steps.report.outputs.exit_code != '0' || github.event.inputs.update_issue == 'true' || github.event_name == 'schedule' || github.event_name == 'pull_request' || github.event_name == 'push' }}
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const body = fs.readFileSync('health.md', 'utf8');
-            const { owner, repo } = context.repo;
-            const title = 'Repo Health';
-            const labels = ['automation','health'];
-            const issues = await github.paginate(github.rest.issues.listForRepo, { owner, repo, state: 'open', per_page: 100 });
-            const existing = issues.find(i => i.title === title);
-            if (existing) {
-              await github.rest.issues.update({ owner, repo, issue_number: existing.number, title, body });
-              await github.rest.issues.setLabels({ owner, repo, issue_number: existing.number, labels });
-            } else {
-              await github.rest.issues.create({ owner, repo, title, body, labels });
-            }
-      - name: Fail if health is red (only when strict=true)
-        if: ${{ steps.report.outputs.exit_code != '0' && github.event.inputs.strict == 'true' }}
-        run: exit 1
-YAML
-
-          # --- scripts/test_imports.py ---
-          cat > scripts/test_imports.py <<'PY'
-#!/usr/bin/env python3
-from __future__ import annotations
-import argparse, importlib, importlib.util, sys, traceback
-from pathlib import Path
-from typing import List, Tuple, Optional
-
-def ensure_repo_root_on_path() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    root_str = str(repo_root)
-    if root_str not in sys.path:
-        sys.path.insert(0, root_str)
-
-def ensure_src_on_path() -> None:
-    src = Path("src")
-    if src.is_dir():
-        sys.path.insert(0, str(src.resolve()))
-
-def have_streamlit_app() -> tuple[Optional[str], Optional[Path]]:
-    if (Path("streamlit_app") / "__init__.py").exists(): return "streamlit_app", None
-    if (Path("src") / "streamlit_app" / "__init__.py").exists(): return "streamlit_app", None
-    for p in [Path("streamlit_app.py"), Path("src/streamlit_app.py")]:
-        if p.exists(): return "streamlit_app", p
-    return None, None
-
-def src_packages() -> List[str]:
-    out: List[str] = []
-    src = Path("src")
-    if src.is_dir():
-        for p in src.iterdir():
-            if p.is_dir() and (p / "__init__.py").exists() and p.name.isidentifier():
-                out.append(p.name)
-    return sorted(set(out))
-
-def import_module(name: str) -> tuple[bool, str]:
-    try:
-        importlib.import_module(name); return True, ""
-    except Exception as e:
-        return False, "".join(traceback.format_exception_only(type(e), e)).strip()
-
-def import_file(path: Path, alias: str) -> tuple[bool, str]:
-    try:
-        spec = importlib.util.spec_from_file_location(alias, str(path))
-        if spec and spec.loader:
-            m = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(m)  # type: ignore[attr-defined]
-            sys.modules[alias] = m
-            return True, ""
-        return False, f"Unable to load spec for {path}"
-    except Exception as e:
-        return False, f"{path}: " + "".join(traceback.format_exception_only(type(e), e)).strip()
-
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--packages", default="")
-    ap.add_argument("--allow-empty", action="store_true")
-    args = ap.parse_args()
-
-    ensure_repo_root_on_path()
-    ensure_src_on_path()
-
-    forced = [x.strip() for x in args.packages.split(",") if x.strip()]
-    targets: List[tuple[str, Optional[Path]]] = []
-
-    if forced:
-        targets = [(name, None) for name in forced]
-    else:
-        name, path = have_streamlit_app()
-        if name:
-            targets.append((name, path))
-        for pkg in src_packages():
-            if pkg != "streamlit_app":
-                targets.append((pkg, None))
-
-    print(f"PYTHONPATH head: {sys.path[:4]}")
-    print("Smoke targets:", [t[0] + ("" if t[1] is None else f' (file:{t[1]})') for t in targets])
-
-    if not targets:
-        if args.allow_empty:
-            print("Nothing to test (allow-empty)."); return 0
-        print("No targets found."); return 1
-
-    failed = 0
-    for idx, (name, file_path) in enumerate(targets, 1):
-        if file_path is None:
-            ok, err = import_module(name)
-            print(f"[{'OK' if ok else 'FAIL'}] import {name}")
-        else:
-            ok, err = import_file(file_path, f"ci_smoke_file_{idx}")
-            print(f"[{'OK' if ok else 'FAIL'}] import file:{file_path}")
-        if not ok:
-            print("  Error:", err); failed += 1
-
-    if failed:
-        print(f"{failed} import(s) failed."); return 1
-    print("All imports succeeded."); return 0
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-PY
-          chmod +x scripts/test_imports.py
-
-          # --- scripts/health_report.py (unchanged from your working version) ---
-          # Keep your existing scripts/health_report.py. If missing, it will be re-written
-          # by the Repo Health workflow run.
-
-      - name: Ensure __init__.py for every Python folder (managers per folder)
-        shell: python
-        run: |
-          import os
-          from pathlib import Path
-          EXCLUDE={'.git','.github','scripts','__pycache__','venv','.venv'}
-          created=[]
-          def ok_dir(d: Path):
-            n=d.name
-            return (n not in EXCLUDE) and (not n.startswith('.'))
-          for root, dirs, files in os.walk('.'):
-            d=Path(root)
-            if not ok_dir(d): 
-              continue
-            if any(f.endswith('.py') for f in files):
-              init=d/'__init__.py'
-              if not init.exists():
-                init.write_text('', encoding='utf-8'); created.append(str(init))
-          print("Created __init__.py files:", created)
-
-      - name: Commit & push fixes (to the triggering branch)
-        run: |
-          set -e
-          git config user.name "repo-steward[bot]"
-          git config user.email "repo-steward@users.noreply.github.com"
-          git add -A
-          if git diff --cached --quiet; then
-            echo "Nothing to commit."
+          if [ -f scripts/smoke_tools.py ]; then
+            python scripts/smoke_tools.py
           else
-            git commit -m "ci: steward normalize CI & ensure package inits"
-            git push origin "${{ steps.branch.outputs.name }}"
+            python scripts/test_imports.py --allow-empty
           fi
 
-      - name: Setup Python for on-the-spot checks
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install project (best-effort)
-        run: |
-          set -e
-          python -m pip install --upgrade pip
-          if [ -f "pyproject.toml" ]; then
-            pip install -e .
-          elif [ -f "requirements.txt" ]; then
-            pip install -r requirements.txt
-          fi
-
-      - name: Make src importable for this job
-        run: |
-          echo "PYTHONPATH=$PYTHONPATH:$(pwd)" >> $GITHUB_ENV
-          if [ -d "src" ]; then
-            echo "PYTHONPATH=$PYTHONPATH:$(pwd)/src" >> $GITHUB_ENV
-          fi
-
-      - name: RUN Smoke (now)
-        run: |
-          python scripts/test_imports.py --allow-empty $([ -n "${{ inputs.packages_override }}" ] && echo "--packages ${{ inputs.packages_override }}")
-
-      - name: RUN Health (now)
+      - name: Generate Repo Health report
         id: health
         run: |
           set +e
           python scripts/health_report.py --out health.md $([ "${{ inputs.strict }}" = "true" ] && echo "--strict")
-          rc=$?
-          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
           set -e
 
       - name: Upload health artifact
@@ -373,6 +97,7 @@ PY
           path: health.md
 
       - name: Create/Update 'Repo Health' issue
+        if: ${{ steps.health.outputs.exit_code != '0' || github.event_name == 'schedule' || github.event_name == 'push' || github.event_name == 'pull_request' }}
         uses: actions/github-script@v7
         with:
           script: |
@@ -381,7 +106,7 @@ PY
             const { owner, repo } = context.repo;
             const title = 'Repo Health';
             const labels = ['automation','health'];
-            const issues = await github.paginate(github.rest.issues.listForRepo, { owner, repo, state: 'open', per_page: 100 });
+            const { data: issues } = await github.rest.issues.listForRepo({ owner, repo, state: 'open', per_page: 100 });
             const existing = issues.find(i => i.title === title);
             if (existing) {
               await github.rest.issues.update({ owner, repo, issue_number: existing.number, title, body });
@@ -390,7 +115,6 @@ PY
               await github.rest.issues.create({ owner, repo, title, body, labels });
             }
 
-      - name: Fail job (only if strict=true and report is red)
+      - name: Fail if health is red (only when strict=true)
         if: ${{ steps.health.outputs.exit_code != '0' && inputs.strict == true }}
         run: exit 1
-
