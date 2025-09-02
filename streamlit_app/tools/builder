@@ -1,43 +1,52 @@
 import os
 import base64
-import json
-from datetime import datetime
-
-import requests
 import streamlit as st
-import yaml
 
 # ─────────────────────────────────────────────────────────
-# Config from Streamlit Secrets (set in Streamlit Cloud)
+# Config from environment (set via Streamlit secrets)
 # ─────────────────────────────────────────────────────────
 GITHUB_TOKEN  = os.getenv("GITHUB_TOKEN", "")
 GITHUB_REPO   = os.getenv("GITHUB_REPO", "")          # e.g. "swanepoelchristo/milkbox-ai"
 GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
 API_ROOT      = "https://api.github.com"
 
-HDRS = {
-    "Authorization": f"token {GITHUB_TOKEN}",
-    "Accept": "application/vnd.github+json",
-    "X-GitHub-Api-Version": "2022-11-28",
-}
-
-
-# ─────────────────────────────────────────────────────────
-# GitHub helpers
-# ─────────────────────────────────────────────────────────
-def _gh_get(path: str, params=None):
-    return requests.get(f"{API_ROOT}{path}", headers=HDRS, params=params or {})
-
-def _gh_put(path: str, payload: dict):
-    return requests.put(f"{API_ROOT}{path}", headers=HDRS, json=payload)
-
-def _gh_post(path: str, payload: dict):
-    return requests.post(f"{API_ROOT}{path}", headers=HDRS, json=payload)
+def _headers():
+    hdrs = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if GITHUB_TOKEN:
+        hdrs["Authorization"] = f"token {GITHUB_TOKEN}"
+    return hdrs
 
 def _b64(text: str) -> str:
     return base64.b64encode(text.encode("utf-8")).decode("utf-8")
 
-def _read_file_and_sha(repo_path: str, ref: str = None):
+# ─────────────────────────────────────────────────────────
+# GitHub helpers (lazy-import requests so CI smoke passes)
+# ─────────────────────────────────────────────────────────
+def _gh_get(path: str, params=None):
+    try:
+        import requests  # lazy
+    except ModuleNotFoundError:
+        raise ModuleNotFoundError("Missing dependency: requests")
+    return requests.get(f"{API_ROOT}{path}", headers=_headers(), params=params or {})
+
+def _gh_put(path: str, payload: dict):
+    try:
+        import requests  # lazy
+    except ModuleNotFoundError:
+        raise ModuleNotFoundError("Missing dependency: requests")
+    return requests.put(f"{API_ROOT}{path}", headers=_headers(), json=payload)
+
+def _gh_post(path: str, payload: dict):
+    try:
+        import requests  # lazy
+    except ModuleNotFoundError:
+        raise ModuleNotFoundError("Missing dependency: requests")
+    return requests.post(f"{API_ROOT}{path}", headers=_headers(), json=payload)
+
+def _read_file_and_sha(repo_path: str, ref: str | None = None):
     """Return (text_or_None, sha_or_None, err_or_None)"""
     r = _gh_get(f"/repos/{GITHUB_REPO}/contents/{repo_path}", params={"ref": ref} if ref else None)
     if r.status_code == 404:
@@ -46,14 +55,15 @@ def _read_file_and_sha(repo_path: str, ref: str = None):
         return None, None, f"GET {repo_path} failed: {r.status_code} {r.text}"
     data = r.json()
     try:
-        text = base64.b64decode(data["content"]).decode("utf-8")
+        import base64 as _b64mod
+        text = _b64mod.b64decode(data["content"]).decode("utf-8")
     except Exception as e:
         return None, None, f"decode error: {e}"
     return text, data.get("sha"), None
 
 def _create_or_update_file(repo_path: str, content_text: str, commit_message: str):
     """
-    Create or update a file using the correct sha (if present) so we *update* rather than overwrite.
+    Create or update a file using the correct sha (if present) so we update rather than overwrite.
     Returns (ok, message).
     """
     existing_text, sha, err = _read_file_and_sha(repo_path, ref=GITHUB_BRANCH)
@@ -71,10 +81,10 @@ def _create_or_update_file(repo_path: str, content_text: str, commit_message: st
     r = _gh_put(f"/repos/{GITHUB_REPO}/contents/{repo_path}", payload)
     if r.status_code in (200, 201):
         return True, ("updated" if r.status_code == 200 else "created")
-    # simple retry for race (optional: could re-fetch sha once)
+
+    # simple retry if race
     if r.status_code in (409, 422) and not sha:
-        # try again by fetching sha
-        existing_text, sha2, err2 = _read_file_and_sha(repo_path, ref=GITHUB_BRANCH)
+        _, sha2, err2 = _read_file_and_sha(repo_path, ref=GITHUB_BRANCH)
         if err2:
             return False, err2
         payload["sha"] = sha2
@@ -82,11 +92,11 @@ def _create_or_update_file(repo_path: str, content_text: str, commit_message: st
         if r2.status_code in (200, 201):
             return True, ("updated" if r2.status_code == 200 else "created")
         return False, f"PUT retry failed: {r2.status_code} {r2.text}"
+
     return False, f"PUT failed: {r.status_code} {r.text}"
 
-
 # ─────────────────────────────────────────────────────────
-# tools.yaml upsert (append or update, never wipe)
+# tools.yaml upsert (append or update; accept list format)
 # ─────────────────────────────────────────────────────────
 def upsert_tool_in_tools_yaml(tool_key: str, label: str, module_path: str) -> tuple[bool, str]:
     """
@@ -100,6 +110,11 @@ def upsert_tool_in_tools_yaml(tool_key: str, label: str, module_path: str) -> tu
     if err:
         return False, err
 
+    try:
+        import yaml  # lazy
+    except ModuleNotFoundError:
+        return False, "Missing dependency: PyYAML (yaml)"
+
     if current_text is None:
         data = {"tools": []}
     else:
@@ -109,6 +124,18 @@ def upsert_tool_in_tools_yaml(tool_key: str, label: str, module_path: str) -> tu
             return False, f"YAML parse error: {e}"
 
     tools = data.get("tools", [])
+    # We operate on list-of-entries form: [{key, label, module}, ...]
+    if not isinstance(tools, list):
+        # If it's a mapping, convert to list without losing data
+        new_list = []
+        if isinstance(tools, dict):
+            for k, v in tools.items():
+                if isinstance(v, str):
+                    new_list.append({"key": k, "label": k, "module": v})
+                elif isinstance(v, dict):
+                    new_list.append({"key": k, "label": v.get("label", k), "module": v.get("module", f"tools.{k}")})
+        tools = new_list
+
     found = False
     for t in tools:
         if isinstance(t, dict) and t.get("key") == tool_key:
@@ -120,7 +147,11 @@ def upsert_tool_in_tools_yaml(tool_key: str, label: str, module_path: str) -> tu
         tools.append({"key": tool_key, "label": label, "module": module_path})
 
     data["tools"] = tools
-    new_yaml = yaml.safe_dump(data, sort_keys=False, default_flow_style=False).rstrip() + "\n"
+
+    try:
+        new_yaml = yaml.safe_dump(data, sort_keys=False, default_flow_style=False).rstrip() + "\n"
+    except Exception as e:
+        return False, f"YAML dump error: {e}"
 
     payload = {
         "message": f"chore(builder): upsert tool '{tool_key}' into tools.yaml",
@@ -134,7 +165,6 @@ def upsert_tool_in_tools_yaml(tool_key: str, label: str, module_path: str) -> tu
     if r.status_code in (200, 201):
         return True, ("updated tools.yaml" if r.status_code == 200 else "created tools.yaml")
     return False, f"GitHub write failed: {r.status_code} {r.text}"
-
 
 # ─────────────────────────────────────────────────────────
 # Tool file scaffold
@@ -158,23 +188,25 @@ def render():
         st.success(f"✅ {tool_label} ran! You typed: {{example}}")
 '''
 
-
 # ─────────────────────────────────────────────────────────
-# UI
+# UI (zero-arg render so CI smoke passes)
 # ─────────────────────────────────────────────────────────
 def render():
     st.title("🛠️ Tool Builder")
     st.caption("Create or update a tool module in GitHub and auto-register it in tools.yaml (append/update, no duplicates).")
 
-    if not GITHUB_TOKEN or not GITHUB_REPO:
-        st.error("Missing `GITHUB_TOKEN` or `GITHUB_REPO` in Streamlit secrets. Please add them in Streamlit Cloud → App → Settings → Secrets.")
+    if not GITHUB_REPO:
+        st.error("Missing `GITHUB_REPO` in secrets. Example: swanepoelchristo/milkbox-ai")
+        return
+    if not GITHUB_TOKEN:
+        st.error("Missing `GITHUB_TOKEN` in secrets. Create a classic token with repo scope.")
         return
 
     with st.form("builder_form", clear_on_submit=False):
-        tool_key   = st.text_input("Tool key (e.g. invoice_gen, bar_tools)", value="")
-        tool_label = st.text_input("Tool label (e.g. Invoice Generator)", value="")
+        tool_key    = st.text_input("Tool key (e.g. invoice_gen, bar_tools)", value="")
+        tool_label  = st.text_input("Tool label (e.g. Invoice Generator)", value="")
         description = st.text_area("Short description (what the tool should do)", value="", height=90)
-        submitted = st.form_submit_button("Generate / Update tool")
+        submitted   = st.form_submit_button("Generate / Update tool")
 
     if not submitted:
         return
@@ -195,8 +227,14 @@ def render():
     code = make_tool_scaffold(slug, tool_label.strip(), description.strip())
     commit_msg = f"feat(builder): add/update tool '{slug}' module"
 
-    with st.spinner("Creating/updating tool file in GitHub…"):
-        ok, msg = _create_or_update_file(repo_path, code, commit_msg)
+    # Write file
+    try:
+        with st.spinner("Creating/updating tool file in GitHub…"):
+            ok, msg = _create_or_update_file(repo_path, code, commit_msg)
+    except ModuleNotFoundError as e:
+        st.error(f"{e}. Please add `requests` to requirements.txt.")
+        return
+
     if ok:
         st.success(f"✅ {repo_path} {msg}.")
         st.code(code, language="python")
@@ -204,8 +242,8 @@ def render():
         st.error(f"❌ Could not write {repo_path}: {msg}")
         return
 
-    with st.spinner("Registering tool in tools.yaml…"):
-        ok2, msg2 = upsert_tool_in_tools_yaml(slug, tool_label.strip(), module_path)
+    # Update tools.yaml
+    ok2, msg2 = upsert_tool_in_tools_yaml(slug, tool_label.strip(), module_path)
     if ok2:
         st.success(f"✅ {msg2}")
         st.info("Tip: Use the sidebar to select the new tool. If you don't see it, click 'Rerun' in the app menu.")
