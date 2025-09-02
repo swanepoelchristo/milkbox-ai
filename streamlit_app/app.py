@@ -11,8 +11,7 @@ import yaml
 from utils.tool_loader import render_or_placeholder
 
 # ─────────────────────────────────────────────────────────
-# Importer banner + build meta (visible proof of deploy)
-# (Safe even if .build-meta.json doesn't exist yet)
+# Importer banner + build meta (safe even if file missing)
 # ─────────────────────────────────────────────────────────
 try:
     st.sidebar.caption("Importer v2 active")
@@ -25,14 +24,12 @@ try:
         ts = meta.get("ts") or "unknown"
     st.sidebar.caption(f"Build: {sha} @ {ts} UTC")
 except Exception:
-    # Don't let sidebar meta ever break the app
     pass
 
 # ─────────────────────────────────────────────────────────
 # Paths
 # ─────────────────────────────────────────────────────────
 APP_ROOT = Path(__file__).resolve().parent              # .../streamlit_app
-TOOLS_DIR = APP_ROOT / "tools"                          # .../streamlit_app/tools
 REPO_ROOT = APP_ROOT.parent                             # repo root
 TOOLS_FILE = REPO_ROOT / "tools.yaml"                   # .../tools.yaml
 
@@ -45,8 +42,6 @@ if str(APP_ROOT) not in sys.path:
 # ─────────────────────────────────────────────────────────
 def load_tools_config() -> Dict[str, Any]:
     """
-    Read tools.yaml from the repo root and return the parsed dict.
-
     Expected shape:
       tools:
         - key: invoice_gen
@@ -113,7 +108,6 @@ def render_sidebar(tools: List[Dict[str, Any]]) -> Optional[str]:
     has_sections = any(t.get("section") for t in tools)
 
     if has_sections:
-        # Group by 'section' while keeping insertion order
         groups: Dict[str, List[Dict[str, Any]]] = {}
         for t in tools:
             groups.setdefault(t.get("section") or "Tools", []).append(t)
@@ -143,24 +137,22 @@ def render_sidebar(tools: List[Dict[str, Any]]) -> Optional[str]:
 # ─────────────────────────────────────────────────────────
 def render_selected_tool(tools: List[Dict[str, Any]], key: Optional[str]) -> None:
     """
-    Render the selected tool using the robust loader.
-    - Tries import by module path
-    - Falls back to streamlit_app/tools/<key>.py
-    - If not present, shows a friendly placeholder
-    - Enforces zero-arg render() when present
+    Use the robust loader:
+    - Try import by module path
+    - Fallback to streamlit_app/tools/<key>.py
+    - If not present, show a friendly placeholder
+    - Enforce zero-arg render() when present
     """
     if not key:
         st.header("Milkbox AI Toolbox")
         st.write("Select a tool from the sidebar to begin.")
         return
 
-    # Lookup in config
     entry = next((t for t in tools if t["key"] == key), None)
     if not entry:
         st.error(f"Tool '{key}' not found in tools.yaml.")
         return
 
-    # Delegate to the robust loader
     render_or_placeholder(entry["key"], entry["module"])
 
 # ─────────────────────────────────────────────────────────
