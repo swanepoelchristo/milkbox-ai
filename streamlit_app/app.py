@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
-import importlib
-import importlib.util
+from typing import Any, Dict, List, Optional
 import sys
 from pathlib import Path
-import types
-import json  # ← added
+import json
 
 import streamlit as st
 import yaml
 
+from utils.tool_loader import render_or_placeholder
 
 # ─────────────────────────────────────────────────────────
 # Importer banner + build meta (visible proof of deploy)
@@ -30,7 +28,6 @@ except Exception:
     # Don't let sidebar meta ever break the app
     pass
 
-
 # ─────────────────────────────────────────────────────────
 # Paths
 # ─────────────────────────────────────────────────────────
@@ -42,7 +39,6 @@ TOOLS_FILE = REPO_ROOT / "tools.yaml"                   # .../tools.yaml
 # Make sure the app can import from streamlit_app/
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
-
 
 # ─────────────────────────────────────────────────────────
 # Config loading
@@ -99,120 +95,6 @@ def normalize_tools(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
             )
     return cleaned
 
-
-# ─────────────────────────────────────────────────────────
-# Smart importer (v2)
-# ─────────────────────────────────────────────────────────
-FIXED_CANDIDATES = [
-    "__init__.py",
-    "app.py",
-    "main.py",
-    "index.py",
-    "page.py",
-    "render.py",
-]
-
-def _load_module_from_file(fully_qualified_name: str, file_path: Path) -> types.ModuleType:
-    spec = importlib.util.spec_from_file_location(fully_qualified_name, file_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Unable to create spec for {file_path}")
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[fully_qualified_name] = mod
-    spec.loader.exec_module(mod)  # type: ignore[attr-defined]
-    return mod
-
-
-def _all_py_files_sorted(pkg_dir: Path, name: str) -> List[Path]:
-    """
-    Return ALL .py files in the directory in a priority order:
-    - fixed candidates first (if present)
-    - then <name>.py
-    - then everything else alphabetically
-    """
-    seen: set[Path] = set()
-    ordered: List[Path] = []
-
-    # Fixed candidates
-    for fname in FIXED_CANDIDATES:
-        p = pkg_dir / fname
-        if p.exists() and p.suffix == ".py" and p not in seen:
-            ordered.append(p); seen.add(p)
-
-    # <name>.py
-    p = pkg_dir / f"{name}.py"
-    if p.exists() and p not in seen:
-        ordered.append(p); seen.add(p)
-
-    # Everything else *.py
-    for p in sorted(pkg_dir.glob("*.py")):
-        if p not in seen:
-            ordered.append(p); seen.add(p)
-
-    return ordered
-
-
-def smart_import(module_path: str) -> Tuple[Optional[types.ModuleType], List[Path]]:
-    """
-    Try importlib first. If that fails, try loading from the filesystem so
-    packages without __init__.py or directory-only tools still work.
-
-    Returns (module or None, tried_paths)
-    """
-    tried: List[Path] = []
-    # 1) Normal import
-    try:
-        return importlib.import_module(module_path), tried
-    except ModuleNotFoundError:
-        pass
-    except Exception:
-        # Unexpected import error; let caller handle so we can show it.
-        return None, tried
-
-    # Expecting tools.<name>
-    parts = module_path.split(".")
-    if len(parts) != 2 or parts[0] != "tools":
-        # Not our domain—give up here.
-        return None, tried
-
-    name = parts[1]
-
-    # a) tools/<name>.py
-    single_file = TOOLS_DIR / f"{name}.py"
-    tried.append(single_file)
-    if single_file.exists():
-        try:
-            return _load_module_from_file(module_path, single_file), tried
-        except Exception:
-            return None, tried
-
-    # b) tools/<name>/(candidates, then any .py)
-    pkg_dir = TOOLS_DIR / name
-    if pkg_dir.is_dir():
-        # Create a comprehensive candidate list to try and to show in errors
-        candidates: List[Path] = []
-        # show fixed + name.py (even if missing) so users see what we attempted
-        for fname in FIXED_CANDIDATES + [f"{name}.py"]:
-            candidates.append(pkg_dir / fname)
-        # and then any .py actually present
-        for p in _all_py_files_sorted(pkg_dir, name):
-            if p not in candidates:
-                candidates.append(p)
-
-        # record them all for the error message
-        tried.extend(candidates)
-
-        # attempt only the ones that actually exist
-        for candidate in candidates:
-            if candidate.exists():
-                try:
-                    return _load_module_from_file(module_path, candidate), tried
-                except Exception:
-                    # try next candidate
-                    continue
-
-    return None, tried
-
-
 # ─────────────────────────────────────────────────────────
 # Sidebar UI
 # ─────────────────────────────────────────────────────────
@@ -256,17 +138,16 @@ def render_sidebar(tools: List[Dict[str, Any]]) -> Optional[str]:
     st.session_state["selected_tool"] = selected_key
     return selected_key
 
-
 # ─────────────────────────────────────────────────────────
 # Main area
 # ─────────────────────────────────────────────────────────
 def render_selected_tool(tools: List[Dict[str, Any]], key: Optional[str]) -> None:
     """
-    Import and render the selected tool.
-
-    We keep using the module path provided by tools.yaml (e.g. "tools.notes").
-    If the normal import fails, we fall back to loading directly from the
-    filesystem so directory-only tools work without __init__.py.
+    Render the selected tool using the robust loader.
+    - Tries import by module path
+    - Falls back to streamlit_app/tools/<key>.py
+    - If not present, shows a friendly placeholder
+    - Enforces zero-arg render() when present
     """
     if not key:
         st.header("Milkbox AI Toolbox")
@@ -279,30 +160,8 @@ def render_selected_tool(tools: List[Dict[str, Any]], key: Optional[str]) -> Non
         st.error(f"Tool '{key}' not found in tools.yaml.")
         return
 
-    module_path = entry["module"]
-
-    # Try smart import
-    mod, tried = smart_import(module_path)
-    if mod is None:
-        # Generate a helpful message
-        rel = [p.relative_to(REPO_ROOT) if p.is_absolute() else p for p in tried]
-        tried_lines = "\n".join(f"• {p}" for p in rel) or "• (no candidates found)"
-        st.error(
-            f"Couldn't import module `{module_path}`.\n\n"
-            f"Make sure the module path in tools.yaml matches the file on disk.\n"
-            f"Tried the following paths:\n{tried_lines}"
-        )
-        return
-
-    # Render
-    if hasattr(mod, "render"):
-        try:
-            mod.render()
-        except Exception as e:
-            st.error(f"Error while rendering `{entry['label']}`: {e}")
-    else:
-        st.error(f"Module `{module_path}` has no function `render()`.")
-
+    # Delegate to the robust loader
+    render_or_placeholder(entry["key"], entry["module"])
 
 # ─────────────────────────────────────────────────────────
 # App entrypoint
@@ -315,7 +174,6 @@ def main() -> None:
 
     selected = render_sidebar(tools)
     render_selected_tool(tools, selected)
-
 
 if __name__ == "__main__":
     main()
