@@ -2,14 +2,31 @@
 """
 Smoke-check tool modules defined in tools.yaml.
 
-- Reads tools.yaml mapping {key -> module} or {key: {module: "..."}}, with or without a top-level 'tools:'.
-- Adds streamlit_app to sys.path so 'tools.*' resolves.
-- Tries to import the module; on ModuleNotFoundError falls back to streamlit_app/tools/<key>.py.
-- If neither import path exists, we SKIP (planned/not present yet) with a GA notice.
-- If we import a module, we REQUIRE a zero-arg callable render(); otherwise it's a failure.
-- Exits non-zero only if any *present* tool fails. Skips do not fail CI.
+Accepted tools.yaml shapes:
+1) Mapping:
+   tools:
+     hello: tools.hello
+     notes:
+       module: tools.notes
+       enabled: true
+2) List of {key, module[, enabled]}:
+   tools:
+     - key: hello
+       module: tools.hello
+     - key: notes
+       module: tools.notes
+       enabled: true
+3) List of single-key maps:
+   tools:
+     - hello: tools.hello
+     - notes: tools.notes
 
-This lets you keep future/planned tools in tools.yaml without blocking PRs.
+Behavior:
+- Adds streamlit_app to sys.path so 'tools.*' resolves.
+- Import module; on ModuleNotFoundError, fall back to streamlit_app/tools/<key>.py.
+- If neither path exists, SKIP (planned/not present) – non-blocking.
+- If module/file exists, require a zero-arg callable render(); otherwise FAIL.
+- Honors enabled:false (skips).
 """
 
 from __future__ import annotations
@@ -20,25 +37,20 @@ import importlib.util
 from pathlib import Path
 from typing import Dict, Tuple, List
 
-# --- deps ---------------------------------------------------------------
-
 try:
     import yaml  # type: ignore
 except ModuleNotFoundError:
     print("::error::PyYAML is required (pip install pyyaml).")
     sys.exit(1)
 
-# --- paths --------------------------------------------------------------
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STREAMLIT_APP_DIR = REPO_ROOT / "streamlit_app"
 TOOLS_DIR = STREAMLIT_APP_DIR / "tools"
 TOOLS_YAML = REPO_ROOT / "tools.yaml"
 
-# --- helpers ------------------------------------------------------------
 
 def _ensure_streamlit_stub():
-    """Provide a minimal 'streamlit' stub so tools can import without the heavy dep in CI."""
+    """Provide a minimal 'streamlit' stub so tools can import in CI without the dependency."""
     try:
         import streamlit  # noqa: F401
     except ModuleNotFoundError:
@@ -50,7 +62,13 @@ def _ensure_streamlit_stub():
         sys.modules["streamlit"] = _StreamlitStub()
 
 
-def _load_tools_map() -> Dict[str, str]:
+def _add_entry(out: Dict[str, Dict[str, object]], key: str, module: str | None, enabled: object = True):
+    # default module path if omitted: tools.<key>
+    mod = module or f"tools.{key}"
+    out[key] = {"module": str(mod), "enabled": bool(enabled)}
+
+
+def _load_tools_entries() -> Dict[str, Dict[str, object]]:
     if not TOOLS_YAML.exists():
         print(f"::error file=tools.yaml::Missing tools.yaml at {TOOLS_YAML}")
         sys.exit(1)
@@ -61,26 +79,55 @@ def _load_tools_map() -> Dict[str, str]:
         sys.exit(1)
 
     candidate = data.get("tools", data)
-    if not isinstance(candidate, dict):
-        print("::error file=tools.yaml::Expected a mapping of tool entries.")
+    result: Dict[str, Dict[str, object]] = {}
+
+    if isinstance(candidate, dict):
+        # form: {hello: "tools.hello"} or {hello: {module: "...", enabled: bool}}
+        for key, val in candidate.items():
+            if isinstance(val, str):
+                _add_entry(result, key, val, True)
+            elif isinstance(val, dict):
+                _add_entry(result, key, val.get("module"), val.get("enabled", True))
+            elif val is None:
+                _add_entry(result, key, None, True)
+            else:
+                print(f"::warning file=tools.yaml::Skipping '{key}' – unsupported value type {type(val).__name__}.")
+    elif isinstance(candidate, list):
+        # forms:
+        #  - {key: "hello", module: "tools.hello", enabled: true}
+        #  - {"hello": "tools.hello"} (single-key map)
+        #  - "hello" (string -> default to tools.hello)
+        for i, item in enumerate(candidate):
+            if isinstance(item, str):
+                _add_entry(result, item, None, True)
+                continue
+            if isinstance(item, dict):
+                if "key" in item:
+                    _add_entry(result, str(item["key"]), item.get("module"), item.get("enabled", True))
+                    continue
+                if len(item) == 1:
+                    k, v = next(iter(item.items()))
+                    if isinstance(v, str):
+                        _add_entry(result, str(k), v, True)
+                    elif isinstance(v, dict):
+                        _add_entry(result, str(k), v.get("module"), v.get("enabled", True))
+                    else:
+                        print(f"::warning file=tools.yaml::Skipping list item {i} – unsupported single-key value.")
+                    continue
+                print(f"::warning file=tools.yaml::Skipping list item {i} – missing 'key' or single-key mapping.")
+                continue
+            print(f"::warning file=tools.yaml::Skipping list item {i} – unsupported type {type(item).__name__}.")
+    else:
+        print("::error file=tools.yaml::'tools' must be a mapping or a list of tool entries.")
         sys.exit(1)
 
-    result: Dict[str, str] = {}
-    for key, val in candidate.items():
-        if isinstance(val, str):
-            result[key] = val
-        elif isinstance(val, dict) and isinstance(val.get("module"), str):
-            result[key] = val["module"]
-        else:
-            print(f"::warning file=tools.yaml::Skipping '{key}' – no 'module' string found.")
     if not result:
-        print("::error file=tools.yaml::No usable (key -> module) entries.")
+        print("::error file=tools.yaml::No usable tool entries found.")
         sys.exit(1)
     return result
 
 
 def _import_module_primary(module_path: str):
-    # Ensure 'streamlit_app' is on sys.path so 'tools.*' is importable
     s = str(STREAMLIT_APP_DIR)
     if s not in sys.path:
         sys.path.insert(0, s)
@@ -88,7 +135,6 @@ def _import_module_primary(module_path: str):
 
 
 def _import_module_fallback(key: str):
-    # Load from file streamlit_app/tools/<key>.py
     candidate = TOOLS_DIR / f"{key}.py"
     if not candidate.exists():
         raise FileNotFoundError(f"Fallback file not found: {candidate}")
@@ -119,33 +165,34 @@ def _validate_render(mod, key: str) -> Tuple[bool, str]:
     return True, f"{key}: OK"
 
 
-# --- main ---------------------------------------------------------------
-
 def main() -> int:
     _ensure_streamlit_stub()
-    tools_map = _load_tools_map()
+    entries = _load_tools_entries()
 
     failures: List[str] = []
     successes: List[str] = []
     skips: List[str] = []
 
-    for key, module_path in tools_map.items():
+    for key, cfg in entries.items():
+        module_path = str(cfg.get("module"))
+        enabled = bool(cfg.get("enabled", True))
+        if not enabled:
+            print(f"::notice::{key}: SKIP (enabled=false) (module='{module_path}')")
+            skips.append(key)
+            continue
+
         try:
             try:
-                # 1) primary import
                 mod = _import_module_primary(module_path)
             except ModuleNotFoundError:
-                # 2) fallback: file streamlit_app/tools/<key>.py
                 try:
                     mod = _import_module_fallback(key)
                 except FileNotFoundError:
-                    # Neither module nor file exists -> SKIP (planned/not present)
                     print(f"SKIP {key:<12} {module_path} -> not present (no module or file)")
                     print(f"::notice::{key}: SKIP (not present) (module='{module_path}')")
                     skips.append(key)
                     continue
 
-            # 3) validate render() if module exists
             ok, msg = _validate_render(mod, key)
             if ok:
                 print(f"OK   {key:<12} {module_path}")
@@ -157,7 +204,6 @@ def main() -> int:
                 failures.append(msg)
 
         except Exception as e:
-            # Any other import error (SyntaxError, ImportError inside module, etc.) is a failure
             print(f"BAD  {key:<12} {module_path} -> {e!r}")
             print(f"::error::{key}: Import check failed for '{module_path}': {e!r}")
             failures.append(f"{key}: {e!r}")
