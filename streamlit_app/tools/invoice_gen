@@ -1,17 +1,19 @@
 import io
 from datetime import date
 from decimal import Decimal, InvalidOperation
-
 import streamlit as st
 
-# ========== Helpers ==========
-def parse_items(raw: str):
+CURRENCY_SYMBOLS = {"USD": "$", "EUR": "€", "GBP": "£", "ZAR": "R"}
+
+
+# ---------- Helpers ----------
+def parse_items(raw: str) -> list[dict]:
     """
     Each line: description | qty | price
-    qty and price can be int/float
-    Returns list of dicts: [{"desc":..., "qty": Decimal, "price": Decimal, "total": Decimal}, ...]
+    qty and price parsed as Decimal
+    Returns: [{"desc": str, "qty": Decimal, "price": Decimal, "total": Decimal}, ...]
     """
-    items = []
+    items: list[dict] = []
     raw = (raw or "").strip()
     if not raw:
         return items
@@ -21,7 +23,9 @@ def parse_items(raw: str):
             continue
         parts = [p.strip() for p in line.split("|")]
         if len(parts) != 3:
-            raise ValueError(f"Line {ln_no}: expected 3 fields separated by | (desc | qty | price). Got: {line!r}")
+            raise ValueError(
+                f"Line {ln_no}: expected 3 fields separated by | (desc | qty | price). Got: {line!r}"
+            )
         desc, qty_s, price_s = parts
         try:
             qty = Decimal(qty_s)
@@ -37,26 +41,27 @@ def parse_items(raw: str):
     return items
 
 
-def money(amount: Decimal, currency: str):
+def money(amount: Decimal, currency: str) -> str:
     q = amount.quantize(Decimal("0.01"))
-    symbol = {"USD": "$", "EUR": "€", "GBP": "£", "ZAR": "R"}.get(currency, "")
-    if symbol:
-        return f"{symbol}{q}"
-    return f"{q} {currency}"
+    sym = CURRENCY_SYMBOLS.get(currency, "")
+    formatted = f"{q:,.2f}"
+    return f"{sym}{formatted}" if sym else f"{formatted} {currency}"
 
 
-# ========== PDF Renderer (ReportLab) ==========
-def build_pdf(invoice_no: str,
-              issue_date: date,
-              my_company: dict,
-              client: dict,
-              items: list[dict],
-              tax_percent: Decimal,
-              currency: str) -> bytes:
+# ---------- PDF Renderer (ReportLab) ----------
+def build_pdf(
+    invoice_no: str,
+    issue_date: date,
+    my_company: dict,
+    client: dict,
+    items: list[dict],
+    tax_percent: Decimal,
+    currency: str,
+) -> bytes:
     """
     Create a simple professional PDF invoice and return bytes.
     """
-    # Lazy import so Streamlit runs even before reportlab is installed
+    # Lazy import so the app and CI work without reportlab installed
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import getSampleStyleSheet
@@ -64,7 +69,9 @@ def build_pdf(invoice_no: str,
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 
     buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=18*mm, rightMargin=18*mm, topMargin=18*mm, bottomMargin=18*mm)
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4, leftMargin=18 * mm, rightMargin=18 * mm, topMargin=18 * mm, bottomMargin=18 * mm
+    )
     styles = getSampleStyleSheet()
     story = []
 
@@ -74,72 +81,82 @@ def build_pdf(invoice_no: str,
     story.append(Spacer(1, 8))
 
     # Parties
-    party_tbl = Table([
-        ["From:", my_company.get("name", ""), "", "Bill To:", client.get("name", "")],
-        ["Email:", my_company.get("email", ""), "", "Email:", client.get("email", "")],
-        ["Address:", my_company.get("addr", ""), "", "Address:", client.get("addr", "")],
-    ], colWidths=[20*mm, 60*mm, 10*mm, 20*mm, 60*mm])
-    party_tbl.setStyle(TableStyle([
-        ("FONT", (0, 0), (-1, -1), "Helvetica", 9),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-    ]))
+    party_tbl = Table(
+        [
+            ["From:", my_company.get("name", ""), "", "Bill To:", client.get("name", "")],
+            ["Email:", my_company.get("email", ""), "", "Email:", client.get("email", "")],
+            ["Address:", my_company.get("addr", ""), "", "Address:", client.get("addr", "")],
+        ],
+        colWidths=[20 * mm, 60 * mm, 10 * mm, 20 * mm, 60 * mm],
+    )
+    party_tbl.setStyle(
+        TableStyle(
+            [
+                ("FONT", (0, 0), (-1, -1), "Helvetica", 9),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ]
+        )
+    )
     story.append(party_tbl)
     story.append(Spacer(1, 10))
 
-    # Items table
+    # Items
     data = [["Description", "Qty", "Unit Price", "Line Total"]]
     subtotal = Decimal("0.00")
     for it in items:
-        data.append([
-            it["desc"],
-            f"{it['qty']}",
-            money(it["price"], currency),
-            money(it["total"], currency),
-        ])
+        data.append(
+            [it["desc"], f"{it['qty']}", money(it["price"], currency), money(it["total"], currency)]
+        )
         subtotal += it["total"]
 
-    tbl = Table(data, colWidths=[90*mm, 20*mm, 30*mm, 30*mm])
-    tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
-        ("GRID", (0, 0), (-1, -1), 0.25, colors.lightgrey),
-        ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 9),
-        ("FONT", (0, 1), (-1, -1), "Helvetica", 9),
-        ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-    ]))
+    tbl = Table(data, colWidths=[90 * mm, 20 * mm, 30 * mm, 30 * mm])
+    tbl.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.lightgrey),
+                ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 9),
+                ("FONT", (0, 1), (-1, -1), "Helvetica", 9),
+                ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ]
+        )
+    )
     story.append(tbl)
     story.append(Spacer(1, 8))
 
     # Totals
     tax_amount = (subtotal * (tax_percent / Decimal("100"))).quantize(Decimal("0.01"))
     total = (subtotal + tax_amount).quantize(Decimal("0.01"))
-    totals = Table([
-        ["Subtotal:", money(subtotal, currency)],
-        [f"Tax ({tax_percent}%):", money(tax_amount, currency)],
-        ["Total:", money(total, currency)],
-    ], colWidths=[40*mm, 30*mm], hAlign="RIGHT")
-    totals.setStyle(TableStyle([
-        ("FONT", (0, 0), (-1, -1), "Helvetica", 10),
-        ("FONT", (0, 2), (-1, 2), "Helvetica-Bold", 11),
-        ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
-        ("TOPPADDING", (0, 0), (-1, -1), 2),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-    ]))
+    totals = Table(
+        [["Subtotal:", money(subtotal, currency)], [f"Tax ({tax_percent}%):", money(tax_amount, currency)], ["Total:", money(total, currency)]],
+        colWidths=[40 * mm, 30 * mm],
+        hAlign="RIGHT",
+    )
+    totals.setStyle(
+        TableStyle(
+            [
+                ("FONT", (0, 0), (-1, -1), "Helvetica", 10),
+                ("FONT", (0, 2), (-1, 2), "Helvetica-Bold", 11),
+                ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
+                ("TOPPADDING", (0, 0), (-1, -1), 2),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+            ]
+        )
+    )
     story.append(totals)
     story.append(Spacer(1, 12))
 
-    # Footer note
     story.append(Paragraph("Thank you for your business.", styles["Italic"]))
-
     doc.build(story)
     return buf.getvalue()
 
 
-# ========== Streamlit UI ==========
+# ---------- Streamlit UI ----------
 def render():
     st.header("🧾 Invoice Generator")
-    st.write("Enter client details and line items. Preview totals, then download a PDF invoice.")
+    st.caption("Enter client details and line items. Preview totals, then download a PDF invoice.")
 
     with st.form("inv_form", clear_on_submit=False):
         cols = st.columns(2)
@@ -155,7 +172,11 @@ def render():
         currency = st.selectbox("Currency", ["USD", "EUR", "GBP", "ZAR"], index=0)
         tax_percent_str = st.text_input("Tax %", "0")
         items_hint = "Design work | 10 | 50\nHosting | 1 | 12.99"
-        items_raw = st.text_area("Items (one per line, format: description | qty | price)", value=items_hint, height=120)
+        items_raw = st.text_area(
+            "Items (one per line, format: description | qty | price)",
+            value=items_hint,
+            height=120,
+        )
 
         submitted = st.form_submit_button("Preview")
 
@@ -190,11 +211,11 @@ def render():
     st.write(f"**Currency:** {currency}  |  **Tax:** {tax_percent}%")
 
     # Items preview table
-    prev_cols = st.columns([6, 2, 2, 2])
-    prev_cols[0].markdown("**Description**")
-    prev_cols[1].markdown("**Qty**")
-    prev_cols[2].markdown("**Unit**")
-    prev_cols[3].markdown("**Line Total**")
+    grid_cols = st.columns([6, 2, 2, 2])
+    grid_cols[0].markdown("**Description**")
+    grid_cols[1].markdown("**Qty**")
+    grid_cols[2].markdown("**Unit**")
+    grid_cols[3].markdown("**Line Total**")
     for it in items:
         row = st.columns([6, 2, 2, 2])
         row[0].write(it["desc"])
@@ -203,27 +224,34 @@ def render():
         row[3].write(money(it["total"], currency))
 
     st.markdown("---")
-    tcols = st.columns([6, 2, 2, 2])
-    tcols[2].write("**Subtotal**")
-    tcols[3].write(money(subtotal, currency))
-    tcols = st.columns([6, 2, 2, 2])
-    tcols[2].write(f"**Tax ({tax_percent}%)**")
-    tcols[3].write(money(tax_amount, currency))
-    tcols = st.columns([6, 2, 2, 2])
-    tcols[2].write("**Total**")
-    tcols[3].write(money(total, currency))
+    for label, value in [("Subtotal", subtotal), (f"Tax ({tax_percent}%)", tax_amount), ("Total", total)]:
+        cols = st.columns([6, 2, 2, 2])
+        cols[2].write(f"**{label}**")
+        cols[3].write(money(value, currency))
 
-    # Build the PDF
-    invoice_no = f"{date.today().strftime('%Y%m%d')}-{client_name.strip()[:10] or 'client'}"
-    pdf_bytes = build_pdf(
-        invoice_no=invoice_no,
-        issue_date=date.today(),
-        my_company={"name": my_name, "email": my_email, "addr": my_addr},
-        client={"name": client_name, "email": client_email, "addr": client_addr},
-        items=items,
-        tax_percent=tax_percent,
-        currency=currency,
-    )
+    # Try to build the PDF (graceful if reportlab is missing)
+    invoice_no = f"{date.today():%Y%m%d}-{(client_name or 'client').strip()[:10] or 'client'}"
+    try:
+        pdf_bytes = build_pdf(
+            invoice_no=invoice_no,
+            issue_date=date.today(),
+            my_company={"name": my_name, "email": my_email, "addr": my_addr},
+            client={"name": client_name, "email": client_email, "addr": client_addr},
+            items=items,
+            tax_percent=tax_percent,
+            currency=currency,
+        )
+    except ModuleNotFoundError as e:
+        if "reportlab" in str(e):
+            st.warning(
+                "PDF generation requires the **reportlab** package. "
+                "Add `reportlab` to `requirements.txt` and redeploy to enable downloads."
+            )
+            return
+        raise
+    except Exception as e:
+        st.error(f"PDF generation failed: {e}")
+        return
 
     st.download_button(
         "⬇️ Download PDF",

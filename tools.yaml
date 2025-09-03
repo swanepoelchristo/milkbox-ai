@@ -45,3 +45,8 @@ tools:
     label: Food Safety
     module: tools.food_safety
     section: Free
+
+  - key: war_room
+    label: War Room
+    module: tools.war_room
+    section: Free
