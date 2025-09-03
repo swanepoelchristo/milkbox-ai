@@ -319,3 +319,11 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        import streamlit as st
+        st.error("App failed to start. See details below:")
+        st.exception(e)
+
