@@ -15,6 +15,12 @@ Milkbox AI repository with CI protection:
 
 Prototype Streamlit app for Milkbox AI.  
 
+## Tools
+- **War Room** → [`streamlit_app/tools/war_room.py`](streamlit_app/tools/war_room.py)  
+  A dashboard for monitoring, coordination, and quick response during active development.  
+
+---
+
 ## Run locally
 ```bash
 pip install -r requirements.txt
