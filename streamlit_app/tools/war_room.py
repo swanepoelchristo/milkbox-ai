@@ -149,13 +149,17 @@ def _merge_api_badges(api_statuses: Dict[str, CiStatus]) -> Dict[str, CiStatus]:
     merged: Dict[str, CiStatus] = {}
     for name in WORKFLOW_ORDER:
         wf = WORKFLOWS[name]
-        merged[name] = api_statuses.get(name) or CiStatus(
-            name=name,
-            conclusion=fetch_badge_status(OWNER, REPO, wf).conclusion,
-            updated_at=None,
-            url=f"https://github.com/{OWNER}/{REPO}/actions/workflows/{wf}",
-            source="badge" if name not in api_statuses else "api",
-        )
+        if name in api_statuses:
+            merged[name] = api_statuses[name]
+        else:
+            badge = fetch_badge_status(OWNER, REPO, wf)
+            merged[name] = CiStatus(
+                name=name,
+                conclusion=badge.conclusion,
+                updated_at=None,
+                url=badge.url,
+                source="badge",
+            )
     return merged
 
 
@@ -233,4 +237,3 @@ def render() -> None:
 
 if __name__ == "__main__":
     render()
-
