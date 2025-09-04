@@ -17,3 +17,5 @@ Prototype Streamlit app for Milkbox AI.
 pip install -r streamlit_app/requirements.txt  
 streamlit run streamlit_app/app.py
 <!-- trigger repo health -->
+<!-- trigger CI to register Repo Doctor/Health on main -->
+
