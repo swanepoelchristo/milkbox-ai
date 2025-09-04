@@ -1,5 +1,5 @@
 streamlit
-pyyaml
+PyYAML>=6.0
 requests
 reportlab
 python-docx
