@@ -1,31 +1,31 @@
 # Milkbox AI
 
-[![Repo Doctor](https://github.com/swanepoelchristo/milkbox-ai/actions/workflows/repo_doctor.yml/badge.svg)](../../actions/workflows/repo_doctor.yml)
-[![Smoke](https://github.com/swanepoelchristo/milkbox-ai/actions/workflows/smoke.yml/badge.svg)](../../actions/workflows/smoke.yml)
-[![Repo Health](https://github.com/swanepoelchristo/milkbox-ai/actions/workflows/health.yml/badge.svg)](../../actions/workflows/health.yml)
+## CI Status Panel  
+
+[![Smoke (Imports)](https://github.com/swanepoelchristo/milkbox-ai/actions/workflows/smoke.yml/badge.svg)](https://github.com/swanepoelchristo/milkbox-ai/actions/workflows/smoke.yml)
+[![Repo Health](https://github.com/swanepoelchristo/milkbox-ai/actions/workflows/repo_health.yml/badge.svg)](https://github.com/swanepoelchristo/milkbox-ai/actions/workflows/repo_health.yml)
+[![Repo Doctor](https://github.com/swanepoelchristo/milkbox-ai/actions/workflows/repo_doctor.yml/badge.svg)](https://github.com/swanepoelchristo/milkbox-ai/actions/workflows/repo_doctor.yml)
+[![Repo Steward](https://github.com/swanepoelchristo/milkbox-ai/actions/workflows/repo_steward.yml/badge.svg)](https://github.com/swanepoelchristo/milkbox-ai/actions/workflows/repo_steward.yml)
+[![CodeQL](https://github.com/swanepoelchristo/milkbox-ai/actions/workflows/codeql.yml/badge.svg)](https://github.com/swanepoelchristo/milkbox-ai/actions/workflows/codeql.yml)
+
+---
 
 Milkbox AI repository with CI protection:
-- **Repo Doctor:** validates repo structure, required files, and Python setup  
+
 - **Smoke (Imports):** ensures all Python modules import cleanly  
 - **Repo Health:** checks repo hygiene, dependencies, and reports issues  
+- **Repo Doctor:** enforces repo standards and templates  
+- **Repo Steward:** keeps automation + governance in check  
+- **CodeQL:** scans for security vulnerabilities  
 
 ---
 
-## Overview
+# Milkbox AI  
 
-Prototype Streamlit app for Milkbox AI.
+Prototype Streamlit app for Milkbox AI.  
 
-## Tools
-
-- **War Room** → [`streamlit_app/tools/war_room.py`](streamlit_app/tools/war_room.py)  
-  CI dashboard showing the status of **Repo Doctor**, **Smoke**, and **Repo Health**.  
-  - Uses GitHub API when `GITHUB_TOKEN` is set; otherwise falls back to public badges.  
-  - Exposes `render()` for the tools loader and can run standalone.
-
----
-
-## Run locally
+## Run locally  
 
 ```bash
-pip install -r requirements.txt
+pip install -r streamlit_app/requirements.txt  
 streamlit run streamlit_app/app.py
