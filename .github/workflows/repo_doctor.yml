@@ -1,405 +1,71 @@
 name: Repo Doctor
 
 on:
+  push:
+    branches: [ main, ci/* ]
   workflow_dispatch:
-    inputs:
-      force_overwrite:
-        description: "Overwrite existing files if they differ"
-        type: boolean
-        default: false
-
-permissions:
-  contents: write
-  pull-requests: write
+  schedule:
+    - cron: "17 5 * * 1"  # weekly, Mon 05:17 UTC
 
 jobs:
   doctor:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout (with write perms)
+      - name: Check out repo
         uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 0
 
-      - name: Create working branch
-        run: |
-          set -e
-          BRANCH="ci/fix-health"
-          git checkout -B "$BRANCH"
-
-      - name: Write fixed workflows and scripts
-        env:
-          FORCE: ${{ inputs.force_overwrite }}
+      - name: Validate required files exist
         run: |
           set -euo pipefail
+          echo "Repo Health"
+          echo "------------"
 
-          write_file () {
-            local path="$1"
-            local content="$2"
-            if [ -f "$path" ] && [ "${FORCE}" != "true" ]; then
-              echo "Exists: $path (not overwritten; set force_overwrite=true to replace if differs)"
-              return 0
+          required_files=(
+            ".github/workflows/health.yml"
+            ".github/workflows/repo_doctor.yml"
+            "scripts/test_imports.py"
+            "README.md"
+            "LICENSE"
+          )
+
+          missing=0
+          for f in "${required_files[@]}"; do
+            if [ -e "$f" ]; then
+              printf "OK    %s\n" "$f"
+            else
+              printf "MISSING %s\n" "$f" >&2
+              missing=1
             fi
-            mkdir -p "$(dirname "$path")"
-            printf "%s\n" "$content" > "$path"
-            echo "Wrote: $path"
-          }
+          done
 
-          # ---------------- smoke.yml ----------------
-          SMOKE_YML=$(cat <<'YAML'
-name: Smoke (Imports)
+          # Print last commit info for visibility
+          echo
+          echo "Last commit:"
+          git log -1 --pretty=oneline || true
 
-on:
-  push:
-    branches: [ main, ci/* ]
-  pull_request:
-  workflow_dispatch:
-    inputs:
-      python-version:
-        description: 'Python version to use'
-        required: false
-        default: '3.11'
-      packages:
-        description: 'Comma-separated modules to import (override auto-discovery)'
-        required: false
-        default: ''
+          exit $missing
 
-jobs:
-  smoke:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ github.event.inputs.python-version || '3.11' }}
+          python-version: "3.11"
+          cache: "pip"
 
-      - name: Install project (best-effort)
+      - name: Install minimal deps (best effort)
         run: |
-          set -e
           python -m pip install --upgrade pip
-          if [ -f "pyproject.toml" ]; then
-            pip install -e .
-          elif [ -f "requirements.txt" ]; then
+          if [ -f requirements.txt ]; then
             pip install -r requirements.txt
-          fi
-
-      - name: Add src to PYTHONPATH (idempotent)
-        run: |
-          if [ -d "src" ]; then
-            echo "PYTHONPATH=$PYTHONPATH:$(pwd)/src" >> $GITHUB_ENV
-            echo "Added $(pwd)/src to PYTHONPATH"
           else
-            echo "No src/ directory; skipping."
+            pip install pyyaml
           fi
 
-      - name: Run import smoke
-        run: |
-          python scripts/test_imports.py $([ -n "${{ github.event.inputs.packages }}" ] && echo "--packages ${{ github.event.inputs.packages }}")
-)
-          write_file ".github/workflows/smoke.yml" "$SMOKE_YML"
-
-          # ---------------- repo_health.yml ----------------
-          HEALTH_YML=$(cat <<'YAML'
-name: Repo Health
-
-on:
-  push:
-    branches: [ main, ci/* ]
-  schedule:
-    - cron: '17 5 * * 1'
-  workflow_dispatch:
-    inputs:
-      strict:
-        type: boolean
-        default: false
-        description: 'Fail the job when warnings are present'
-      update_issue:
-        type: boolean
-        default: true
-        description: 'Create/update the Repo Health issue'
-
-jobs:
-  health:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      issues: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Generate health report
-        id: report
-        run: |
-          set +e
-          python -m pip install --upgrade pip
-          python scripts/health_report.py --out health.md $([ "${{ github.event.inputs.strict }}" = "true" ] && echo "--strict")
-          code=$?
-          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
-          echo "Script exit code: $code"
-          set -e
-
-      - name: Upload report artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: repo-health
-          path: health.md
-
-      - name: Add report to job summary
-        if: always()
-        run: |
-          echo "## Repo Health Report" >> "$GITHUB_STEP_SUMMARY"
-          cat health.md >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Create or update 'Repo Health' issue
-        if: ${{ steps.report.outputs.exit_code != '0' || github.event.inputs.update_issue == 'true' || github.event_name == 'schedule' }}
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const body = fs.readFileSync('health.md', 'utf8');
-            const { owner, repo } = context.repo;
-            const title = 'Repo Health';
-            const labels = ['automation','health'];
-            const issues = await github.paginate(github.rest.issues.listForRepo, { owner, repo, state: 'open', per_page: 100 });
-            const existing = issues.find(i => i.title === title);
-            if (existing) {
-              await github.rest.issues.update({ owner, repo, issue_number: existing.number, title, body });
-              await github.rest.issues.setLabels({ owner, repo, issue_number: existing.number, labels });
-              core.setOutput('issue-number', String(existing.number));
-            } else {
-              const created = await github.rest.issues.create({ owner, repo, title, body, labels });
-              core.setOutput('issue-number', String(created.data.number));
-            }
-
-      - name: Fail if health is red (only when strict=true)
-        if: ${{ steps.report.outputs.exit_code != '0' && github.event.inputs.strict == 'true' }}
-        run: exit 1
-YAML
-)
-          write_file ".github/workflows/repo_health.yml" "$HEALTH_YML"
-
-          # ---------------- scripts/test_imports.py ----------------
-          TEST_IMPORTS=$(cat <<'PY'
-#!/usr/bin/env python3
-"""
-Import smoke test that Just Works™ for both flat and src layouts.
-
-- Prepends ./src to sys.path if present
-- Auto-discovers modules from:
-    * pyproject [project.name] (hyphens -> underscores)
-    * packages under ./src/* with __init__.py
-    * top-level packages with __init__.py
-- Optional override: --packages "pkg1,pkg2"
-- If normal import fails, tries to load a matching <name>.py by file path.
-
-Exit codes: 0 OK (or nothing to test), 1 any import failed.
-"""
-from __future__ import annotations
-import argparse, importlib, importlib.util, sys, traceback
-from pathlib import Path
-from typing import List, Tuple
-
-def ensure_src_on_path() -> None:
-    src = Path("src")
-    if src.is_dir():
-        sys.path.insert(0, str(src.resolve()))
-
-def project_name_from_pyproject() -> List[str]:
-    py = Path("pyproject.toml")
-    if not py.exists(): return []
-    try:
-        if sys.version_info >= (3, 11):
-            import tomllib
-        else:
-            import tomli as tomllib  # type: ignore
-        data = tomllib.loads(py.read_text(encoding="utf-8"))
-        name = (data.get("project") or {}).get("name")
-        return [name.replace("-", "_")] if isinstance(name, str) else []
-    except Exception:
-        return []
-
-def discover_packages() -> List[str]:
-    c = set(project_name_from_pyproject())
-    src = Path("src")
-    if src.is_dir():
-        for p in src.iterdir():
-            if p.is_dir() and (p / "__init__.py").exists():
-                c.add(p.name)
-    for p in Path(".").iterdir():
-        if p.is_dir() and (p / "__init__.py").exists() and p.name not in {"src","scripts",".git",".github",".venv","venv"}:
-            c.add(p.name)
-    return sorted(x for x in c if x.isidentifier())
-
-def import_by_name_or_path(mod: str) -> Tuple[bool, str]:
-    try:
-        importlib.import_module(mod)
-        return True, ""
-    except ModuleNotFoundError:
-        for path in Path(".").rglob(f"{mod}.py"):
-            if any(part in {".git",".venv","venv","__pycache__"} for part in path.parts):
-                continue
-            try:
-                spec = importlib.util.spec_from_file_location(mod, str(path))
-                if spec and spec.loader:
-                    m = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(m)  # type: ignore[attr-defined]
-                    sys.modules[mod] = m
-                    return True, ""
-            except Exception as e:
-                return False, f"file-load {path}: {e}"
-        return False, "Module not found (and no matching <name>.py discovered)"
-    except Exception as e:
-        return False, "".join(traceback.format_exception_only(type(e), e)).strip()
-
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--packages", default="")
-    args = ap.parse_args()
-    ensure_src_on_path()
-    targets = [p.strip() for p in args.packages.split(",") if p.strip()] or discover_packages()
-    if not targets:
-        print("No Python packages discovered; skipping import smoke."); return 0
-    print(f"PYTHONPATH[0..2]: {sys.path[:3]}")
-    print(f"Import smoke targets: {targets}")
-    failed = 0
-    for mod in targets:
-        ok, err = import_by_name_or_path(mod)
-        print(f"[{'OK' if ok else 'FAIL'}] import {mod}")
-        if not ok:
-            print(f"  Error: {err}")
-            failed += 1
-    if failed: print(f\"{failed} import(s) failed.\"); return 1
-    print("All imports succeeded."); return 0
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-PY
-)
-          write_file "scripts/test_imports.py" "$TEST_IMPORTS"
-          chmod +x scripts/test_imports.py
-
-          # ---------------- scripts/health_report.py ----------------
-          HEALTH_PY=$(cat <<'PY'
-#!/usr/bin/env python3
-from __future__ import annotations
-import argparse, os, subprocess, sys
-from pathlib import Path
-
-CHECKS = []
-def add(check, result, details, severity="info"):
-    CHECKS.append({"check": check, "result": result, "details": details, "severity": severity})
-
-def ok(p: str) -> bool: return Path(p).exists()
-def git_last() -> str:
-    try: return subprocess.check_output(["git","log","-1","--format=%cI"], text=True).strip() or "unknown"
-    except Exception: return "unknown"
-
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default="")
-    ap.add_argument("--strict", action="store_true")
-    args = ap.parse_args()
-
-    crit = warns = 0
-    req = [
-        (".github/workflows/smoke.yml","Smoke workflow missing"),
-        (".github/workflows/repo_health.yml","Repo health workflow missing"),
-        ("scripts/test_imports.py","Import smoke script missing"),
-        ("scripts/health_report.py","Health report script missing"),
-    ]
-    for path,msg in req:
-        if ok(path): add(f"Presence: {path}","OK","Found")
-        else: add(f"Presence: {path}","FAIL",msg,"fail"); crit += 1
-
-    smoke_txt = Path(".github/workflows/smoke.yml").read_text(encoding="utf-8") if ok(".github/workflows/smoke.yml") else ""
-    if smoke_txt:
-        if "scripts/test_imports.py" in smoke_txt and ".github/scripts/test_imports.py" not in smoke_txt:
-            add("smoke.yml import path","OK","Uses scripts/test_imports.py")
-        else:
-            add("smoke.yml import path","FAIL","Must call scripts/test_imports.py","fail"); crit += 1
-        script_txt = Path("scripts/test_imports.py").read_text(encoding="utf-8") if ok("scripts/test_imports.py") else ""
-        handles_src = ("ensure_src_on_path" in script_txt) or ("sys.path.insert(0" in script_txt and "src" in script_txt)
-        if handles_src or not Path("src").exists():
-            add("src layout support","OK","src/ will be importable")
-        else:
-            add("src layout support","WARN","src/ may not be on PYTHONPATH","warn"); warns += 1
-
-    if ok("README.md"): add("README.md","OK","Found")
-    else: add("README.md","WARN","Missing README.md","warn"); warns += 1
-    if ok("LICENSE") or ok("LICENSE.md"): add("LICENSE","OK","Found")
-    else: add("LICENSE","WARN","Missing LICENSE","warn"); warns += 1
-
-    add("Last commit (git)","INFO",git_last(),"info")
-
-    lines=["# Repo Health","","| Check | Result | Details |","|---|---|---|"]
-    for c in CHECKS: lines.append(f"| {c['check']} | {c['result']} | {c['details']} |")
-    lines.append("")
-    if crit: lines.append(f"**Status:** ❌ {crit} critical failure(s).")
-    elif warns and args.strict: lines.append(f"**Status:** ❌ {warns} warning(s) (strict mode).")
-    elif warns: lines.append(f"**Status:** ⚠️ {warns} warning(s).")
-    else: lines.append("**Status:** ✅ All checks passed.")
-    md="\n".join(lines)
-
-    if args.out: Path(args.out).write_text(md, encoding="utf-8")
-    if "GITHUB_STEP_SUMMARY" in os.environ:
-        try: Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text(md, encoding="utf-8")
-        except Exception: pass
-
-    if crit or (args.strict and warns): return 1
-    return 0
-
-if __name__ == "__main__":
-    sys.exit(main())
-PY
-)
-          write_file "scripts/health_report.py" "$HEALTH_PY"
-          chmod +x scripts/health_report.py
-
-      - name: Commit changes
+      - name: Run import smoke (non-blocking if empty)
         run: |
           set -e
-          git config user.name "repo-doctor[bot]"
-          git config user.email "repo-doctor@users.noreply.github.com"
-          git add .github/workflows/smoke.yml .github/workflows/repo_health.yml scripts/test_imports.py scripts/health_report.py
-          if git diff --cached --quiet; then
-            echo "Nothing to commit"; exit 0
+          if [ -f scripts/test_imports.py ]; then
+            python scripts/test_imports.py --allow-empty
+          else
+            echo "scripts/test_imports.py not found; skipping smoke."
           fi
-          git commit -m "ci: doctor fixes for Smoke & Repo Health (auto)"
-          git push -u origin ci/fix-health --force-with-lease || git push -u origin ci/fix-health
-
-      - name: Open or update PR
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const { owner, repo } = context.repo;
-            const head = "ci/fix-health";
-            const base = "main";
-            const title = "CI: Fix Health & Smoke";
-            const body = [
-              "This PR was opened by **Repo Doctor**.",
-              "",
-              "- Adds robust import smoke (src-aware, file-fallback)",
-              "- Adds Repo Health workflow + markdown report + issue sync",
-              "- Leaves Dependabot & Repo Factory untouched",
-            ].join("\n");
-
-            // Search for existing PR from head -> base
-            const prs = await github.paginate(github.rest.pulls.list, { owner, repo, state: "open", per_page: 100 });
-            let pr = prs.find(p => p.head && p.head.ref === head && p.base && p.base.ref === base);
-            if (pr) {
-              await github.rest.pulls.update({ owner, repo, pull_number: pr.number, title, body });
-              core.info(`Updated PR #${pr.number}`);
-            } else {
-              pr = (await github.rest.pulls.create({ owner, repo, head, base, title, body })).data;
-              core.info(`Created PR #${pr.number}`);
-            }
