@@ -99,7 +99,6 @@ jobs:
       - name: Run import smoke
         run: |
           python scripts/test_imports.py $([ -n "${{ github.event.inputs.packages }}" ] && echo "--packages ${{ github.event.inputs.packages }}")
-YAML
 )
           write_file ".github/workflows/smoke.yml" "$SMOKE_YML"
 
