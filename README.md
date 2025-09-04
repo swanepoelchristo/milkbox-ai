@@ -11,17 +11,21 @@ Milkbox AI repository with CI protection:
 
 ---
 
-# Milkbox AI  
+## Overview
 
-Prototype Streamlit app for Milkbox AI.  
+Prototype Streamlit app for Milkbox AI.
 
 ## Tools
+
 - **War Room** → [`streamlit_app/tools/war_room.py`](streamlit_app/tools/war_room.py)  
-  A dashboard for monitoring, coordination, and quick response during active development.  
+  CI dashboard showing the status of **Repo Doctor**, **Smoke**, and **Repo Health**.  
+  - Uses GitHub API when `GITHUB_TOKEN` is set; otherwise falls back to public badges.  
+  - Exposes `render()` for the tools loader and can run standalone.
 
 ---
 
 ## Run locally
+
 ```bash
 pip install -r requirements.txt
 streamlit run streamlit_app/app.py
