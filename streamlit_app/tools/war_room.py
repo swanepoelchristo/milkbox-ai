@@ -33,7 +33,6 @@ BADGES = {
 }
 
 ACTIONS_LINK = f"https://github.com/{OWNER}/{REPO}/actions"
-
 TIMEOUT = (5, 15)  # connect, read
 
 
@@ -56,23 +55,23 @@ def map_conclusion_to_state(conclusion: Optional[str]) -> str:
         return "failure"
     if c in ("cancelled", "stale", "action_required"):
         return "cancelled"
-    if c in ("skipped"):
+    if c in ("skipped",):
         return "skipped"
     return "unknown"
 
 
 @st.cache_data(ttl=60)
 def fetch_from_api(owner: str, repo: str, workflow_file: str) -> Optional[Tuple[str, str]]:
-    """
-    Return (conclusion, last_run_iso) using GitHub API if token present.
-    """
+    """Return (conclusion, last_run_iso) using GitHub API if token present."""
     token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
     if not token:
         return None
     url = f"https://api.github.com/repos/{owner}/{repo}/actions/workflows/{workflow_file}/runs?per_page=1"
-    r = requests.get(url, headers={"Authorization": f"Bearer {token}",
-                                   "Accept": "application/vnd.github+json"},
-                     timeout=TIMEOUT)
+    r = requests.get(
+        url,
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+        timeout=TIMEOUT,
+    )
     if r.status_code != 200:
         return None
     data = r.json()
@@ -87,9 +86,7 @@ def fetch_from_api(owner: str, repo: str, workflow_file: str) -> Optional[Tuple[
 
 @st.cache_data(ttl=60)
 def fetch_from_badge(badge_url: str) -> Optional[str]:
-    """
-    Fetch badge SVG and return 'passing'/'failing'/etc. if detectable.
-    """
+    """Fetch badge SVG and return 'passing'/'failing'/etc. if detectable."""
     r = requests.get(badge_url, timeout=TIMEOUT)
     if r.status_code != 200:
         return None
@@ -170,17 +167,14 @@ def main():
     st.title("🛠️ War Room")
     st.caption("Live CI snapshot for the Milkbox AI repository.")
 
-    col_a, col_b = st.columns([1,1], gap="large")
+    col_a, col_b = st.columns([1, 1], gap="large")
 
     with col_a:
         st.subheader("CI Status")
-        rows = []
-        for name, wf in WORKFLOWS.items():
-            rows.append(ci_status_for(name, wf))
-
+        rows = [ci_status_for(name, wf) for name, wf in WORKFLOWS.items()]
         for s in rows:
             st.markdown(
-                f"**{s.name}** &nbsp; {pill(s.state.upper(), s.state)}  ",
+                f"**{s.name}** &nbsp; {pill(s.state.upper(), s.state)}",
                 unsafe_allow_html=True,
             )
             sub = f"- Status: `{s.detail}`"
@@ -210,5 +204,11 @@ def main():
     st.caption("Milkbox AI · War Room · CI view")
 
 
+# ----- Contract for tools loader / smoke -----
+def render(*_args, **_kwargs):
+    """Required entrypoint for the tools loader."""
+    return main()
+
+
 if __name__ == "__main__":
-    main()
+    ma
