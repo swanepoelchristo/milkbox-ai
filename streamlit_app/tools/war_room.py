@@ -174,10 +174,11 @@ def _actions_link() -> str:
 # ------------------------- UI -------------------------
 
 def _status_bar(statuses: Dict[str, CiStatus]) -> None:
-    cols = st.columns(len(WORKFLOW_ORDER))
+    n = max(1, len(WORKFLOW_ORDER))  # guard: never zero columns
+    cols = st.columns(n)
     for i, name in enumerate(WORKFLOW_ORDER):
         st_status = statuses.get(name)
-        with cols[i]:
+        with cols[min(i, n - 1)]:
             if not st_status:
                 st.metric(label=name, value="❔ unknown")
                 continue
@@ -237,3 +238,5 @@ def render() -> None:
 
 if __name__ == "__main__":
     render()
+
+     
