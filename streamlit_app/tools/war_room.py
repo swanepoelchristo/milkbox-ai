@@ -4,7 +4,7 @@ CI status panel for Repo Doctor / Smoke / Repo Health / Repo Steward / CodeQL.
 
 - If GITHUB_TOKEN is set, uses the GitHub REST API for precise conclusions/timestamps.
 - Otherwise falls back to reading public badge SVGs and parsing "passing"/"failing".
-- Click "Refresh" to clear cache and re-pull.
+- Click "Refresh" to re-pull; use "Hard refresh" to also clear Streamlit cache.
 
 Run standalone:
     python -m streamlit run streamlit_app/tools/war_room.py
@@ -13,7 +13,9 @@ Run standalone:
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Optional, Dict
 
 import requests
@@ -82,8 +84,27 @@ def _status_emoji(conclusion: str) -> str:
         "in_progress": "🔵",
         "neutral": "⚪",
         "unknown": "❔",
-    }.get(conclusion, "❔")
+    }.get((conclusion or "unknown").lower(), "❔")
 
+
+def _age_text(iso_ts: Optional[str]) -> str:
+    if not iso_ts:
+        return "—"
+    try:
+        dt = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
+        sec = max(0, (datetime.now(timezone.utc) - dt.astimezone(timezone.utc)).total_seconds())
+        if sec < 60:
+            return f"{int(sec)}s ago"
+        if sec < 3600:
+            return f"{int(sec//60)}m ago"
+        if sec < 86400:
+            return f"{int(sec//3600)}h ago"
+        return f"{int(sec//86400)}d ago"
+    except Exception:
+        return iso_ts
+
+
+# ------------------------- Data -------------------------
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_api_statuses(owner: str, repo: str, token: Optional[str]) -> Dict[str, CiStatus]:
@@ -98,7 +119,7 @@ def fetch_api_statuses(owner: str, repo: str, token: Optional[str]) -> Dict[str,
     except Exception:
         return {}
 
-    # pick the newest run per workflow file
+    # newest run per workflow file
     latest_by_wf: Dict[str, dict] = {}
     for run in runs:
         wf_path = (run.get("path") or "").split("/")[-1]
@@ -113,13 +134,13 @@ def fetch_api_statuses(owner: str, repo: str, token: Optional[str]) -> Dict[str,
         run = latest_by_wf.get(wf_file)
         if not run:
             continue
-        conclusion = run.get("conclusion") or run.get("status") or "unknown"
+        conclusion = (run.get("conclusion") or run.get("status") or "unknown").lower()
         if conclusion == "completed" and run.get("conclusion"):
-            conclusion = run["conclusion"]
+            conclusion = run.get("conclusion", "unknown").lower()
         out[name] = CiStatus(
             name=name,
-            conclusion=conclusion or "unknown",
-            updated_at=run.get("updated_at"),
+            conclusion=conclusion,
+            updated_at=run.get("updated_at") or run.get("run_started_at"),
             url=run.get("html_url"),
             source="api",
         )
@@ -128,14 +149,17 @@ def fetch_api_statuses(owner: str, repo: str, token: Optional[str]) -> Dict[str,
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_badge_status(owner: str, repo: str, wf_file: str) -> CiStatus:
+    # tiny retry for flaky network
     url = _badge_url(owner, repo, wf_file)
     conclusion = "unknown"
-    try:
-        r = requests.get(url, timeout=15)
-        if r.status_code == 200:
-            conclusion = _badge_conclusion(r.text)
-    except Exception:
-        pass
+    for _ in range(2):
+        try:
+            r = requests.get(url, timeout=10)
+            if r.status_code == 200:
+                conclusion = _badge_conclusion(r.text)
+                break
+        except Exception:
+            time.sleep(0.2)
     return CiStatus(
         name=wf_file,
         conclusion=conclusion,
@@ -183,9 +207,10 @@ def _status_bar(statuses: Dict[str, CiStatus]) -> None:
                 st.metric(label=name, value="❔ unknown")
                 continue
             emoji = _status_emoji(st_status.conclusion)
+            age = _age_text(st_status.updated_at)
             st.metric(label=name, value=f"{emoji} {st_status.conclusion}")
             if st_status.url:
-                st.caption(f"[open run]({st_status.url}) · via {st_status.source}")
+                st.caption(f"{age} · [open run]({st_status.url}) · via {st_status.source}")
 
 
 def render() -> None:
@@ -197,14 +222,17 @@ def render() -> None:
 
     left, mid, right = st.columns([1, 1, 3])
     with left:
-        if st.button("🔄 Refresh", help="Clear cache and refresh", use_container_width=True):
+        if st.button("🔄 Refresh", help="Re-pull without clearing cache", use_container_width=True):
+            st.experimental_rerun()
+    with mid:
+        if st.button("♻️ Hard refresh", help="Clear Streamlit cache then reload", use_container_width=True):
             fetch_api_statuses.clear()
             fetch_badge_status.clear()
             st.experimental_rerun()
-    with mid:
-        st.link_button("🧪 Open Actions", _actions_link(), use_container_width=True)
     with right:
-        st.link_button("🐞 Open Issues", _issues_link(), use_container_width=True)
+        st.link_button("🧪 Open Actions", _actions_link(), use_container_width=True)
+
+    st.link_button("🐞 Open Issues", _issues_link(), use_container_width=True)
 
     st.divider()
 
@@ -228,6 +256,7 @@ def render() -> None:
             n: {
                 "conclusion": s.conclusion,
                 "updated_at": s.updated_at,
+                "updated_age": _age_text(s.updated_at),
                 "url": s.url,
                 "source": s.source,
             } for n, s in statuses.items()
@@ -238,5 +267,6 @@ def render() -> None:
 
 if __name__ == "__main__":
     render()
+
 
      
