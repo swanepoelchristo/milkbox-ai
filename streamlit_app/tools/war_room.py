@@ -33,7 +33,6 @@ WORKFLOWS = {
 }
 WORKFLOW_ORDER = list(WORKFLOWS.keys())
 
-
 # ------------------------- Model -------------------------
 
 @dataclass
@@ -44,13 +43,11 @@ class CiStatus:
     url: Optional[str]
     source: str              # "api" or "badge"
 
-
 # ------------------------- Helpers -------------------------
 
 def _env_token() -> Optional[str]:
     tok = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     return tok.strip() if tok else None
-
 
 def _api_headers(token: Optional[str]) -> Dict[str, str]:
     headers = {"Accept": "application/vnd.github+json"}
@@ -58,10 +55,8 @@ def _api_headers(token: Optional[str]) -> Dict[str, str]:
         headers["Authorization"] = f"Bearer {token}"
     return headers
 
-
 def _badge_url(owner: str, repo: str, wf_file: str) -> str:
     return f"https://github.com/{owner}/{repo}/actions/workflows/{wf_file}/badge.svg"
-
 
 def _badge_conclusion(svg_text: str) -> str:
     txt = (svg_text or "").lower()
@@ -70,7 +65,6 @@ def _badge_conclusion(svg_text: str) -> str:
     if "failing" in txt or "fail" in txt:
         return "failure"
     return "unknown"
-
 
 def _status_emoji(conclusion: str) -> str:
     return {
@@ -86,7 +80,6 @@ def _status_emoji(conclusion: str) -> str:
         "unknown": "❔",
     }.get((conclusion or "unknown").lower(), "❔")
 
-
 def _age_text(iso_ts: Optional[str]) -> str:
     if not iso_ts:
         return "—"
@@ -96,13 +89,12 @@ def _age_text(iso_ts: Optional[str]) -> str:
         if sec < 60:
             return f"{int(sec)}s ago"
         if sec < 3600:
-            return f"{int(sec//60)}m ago"
+            return f"{int(sec // 60)}m ago"
         if sec < 86400:
-            return f"{int(sec//3600)}h ago"
-        return f"{int(sec//86400)}d ago"
+            return f"{int(sec // 3600)}h ago"
+        return f"{int(sec // 86400)}d ago"
     except Exception:
         return iso_ts
-
 
 # ------------------------- Data -------------------------
 
@@ -146,7 +138,6 @@ def fetch_api_statuses(owner: str, repo: str, token: Optional[str]) -> Dict[str,
         )
     return out
 
-
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_badge_status(owner: str, repo: str, wf_file: str) -> CiStatus:
     # tiny retry for flaky network
@@ -168,7 +159,6 @@ def fetch_badge_status(owner: str, repo: str, wf_file: str) -> CiStatus:
         source="badge",
     )
 
-
 def _merge_api_badges(api_statuses: Dict[str, CiStatus]) -> Dict[str, CiStatus]:
     merged: Dict[str, CiStatus] = {}
     for name in WORKFLOW_ORDER:
@@ -186,14 +176,11 @@ def _merge_api_badges(api_statuses: Dict[str, CiStatus]) -> Dict[str, CiStatus]:
             )
     return merged
 
-
 def _issues_link() -> str:
     return f"https://github.com/{OWNER}/{REPO}/issues"
 
-
 def _actions_link() -> str:
     return f"https://github.com/{OWNER}/{REPO}/actions"
-
 
 # ------------------------- UI -------------------------
 
@@ -211,7 +198,6 @@ def _status_bar(statuses: Dict[str, CiStatus]) -> None:
             st.metric(label=name, value=f"{emoji} {st_status.conclusion}")
             if st_status.url:
                 st.caption(f"{age} · [open run]({st_status.url}) · via {st_status.source}")
-
 
 def render() -> None:
     """Entrypoint for Streamlit (and for Smoke contract)."""
@@ -264,9 +250,5 @@ def render() -> None:
 
     st.caption("Tip: export a personal access token as GITHUB_TOKEN for more accurate reporting.")
 
-
 if __name__ == "__main__":
     render()
-
-
-     
