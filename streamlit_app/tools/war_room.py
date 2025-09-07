@@ -1,273 +1,232 @@
 """
 Milkbox AI — War Room
-CI status panel for Repo Doctor / Smoke / Repo Health / Repo Steward / CodeQL.
+CI status panel for Repo Doctor / Smoke / Repo Health.
 
-- If GITHUB_TOKEN is set, uses the GitHub REST API for precise conclusions/timestamps.
-- Otherwise falls back to reading public badge SVGs and parsing "passing"/"failing".
-- Click "Refresh" to re-pull; use "Hard refresh" to also clear Streamlit cache.
+- Tries GitHub API if GITHUB_TOKEN is set (better timestamps/conclusions).
+- Otherwise falls back to reading public badge SVGs and parsing 'passing'/'failing'.
+- Click "Refresh" to clear cache and re-pull.
 
-Run standalone:
-    python -m streamlit run streamlit_app/tools/war_room.py
+Safe to run standalone:  streamlit run streamlit_app/tools/war_room.py
 """
 
 from __future__ import annotations
 
 import os
-import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Optional, Dict
+from typing import Optional, Tuple
 
 import requests
 import streamlit as st
 
-# --- Repo constants
+# --- Repo constants -----------------------------------------------------------
+
 OWNER = "swanepoelchristo"
 REPO = "milkbox-ai"
+
 WORKFLOWS = {
     "Repo Doctor": "repo_doctor.yml",
-    "Smoke (Imports)": "smoke.yml",
+    "Smoke": "smoke.yml",
     "Repo Health": "health.yml",
-    "Repo Steward": "repo_steward.yml",
-    "CodeQL": "codeql.yml",
 }
-WORKFLOW_ORDER = list(WORKFLOWS.keys())
 
-# ------------------------- Model -------------------------
+BADGES = {
+    name: f"https://github.com/{OWNER}/{REPO}/actions/workflows/{wf}/badge.svg"
+    for name, wf in WORKFLOWS.items()
+}
+
+ACTIONS_LINK = f"https://github.com/{OWNER}/{REPO}/actions"
+TIMEOUT = (5, 15)  # connect, read
+
+
+# --- Model --------------------------------------------------------------------
 
 @dataclass
 class CiStatus:
     name: str
-    conclusion: str          # success | failure | neutral | cancelled | timed_out | action_required | stale | queued | in_progress | unknown
-    updated_at: Optional[str]
-    url: Optional[str]
-    source: str              # "api" or "badge"
+    state: str          # success|failure|cancelled|skipped|unknown
+    detail: str         # e.g., "passing" / "failing" or API conclusion
+    url: str            # link to workflow runs
+    last_run: Optional[str] = None
 
-# ------------------------- Helpers -------------------------
 
-def _env_token() -> Optional[str]:
-    tok = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
-    return tok.strip() if tok else None
-
-def _api_headers(token: Optional[str]) -> Dict[str, str]:
-    headers = {"Accept": "application/vnd.github+json"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    return headers
-
-def _badge_url(owner: str, repo: str, wf_file: str) -> str:
-    return f"https://github.com/{owner}/{repo}/actions/workflows/{wf_file}/badge.svg"
-
-def _badge_conclusion(svg_text: str) -> str:
-    txt = (svg_text or "").lower()
-    if "passing" in txt or "pass" in txt:
+def map_conclusion_to_state(conclusion: Optional[str]) -> str:
+    if not conclusion:
+        return "unknown"
+    c = conclusion.lower()
+    if c in ("success", "passed"):
         return "success"
-    if "failing" in txt or "fail" in txt:
+    if c in ("failure", "failed", "neutral", "timed_out"):
         return "failure"
+    if c in ("cancelled", "stale", "action_required"):
+        return "cancelled"
+    if c in ("skipped",):
+        return "skipped"
     return "unknown"
 
-def _status_emoji(conclusion: str) -> str:
-    return {
-        "success": "✅",
-        "failure": "❌",
-        "cancelled": "⚪",
-        "timed_out": "⏱️",
-        "action_required": "⚠️",
-        "stale": "🟡",
-        "queued": "⏳",
-        "in_progress": "🔵",
-        "neutral": "⚪",
-        "unknown": "❔",
-    }.get((conclusion or "unknown").lower(), "❔")
 
-def _age_text(iso_ts: Optional[str]) -> str:
-    if not iso_ts:
-        return "—"
-    try:
-        dt = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
-        sec = max(0, (datetime.now(timezone.utc) - dt.astimezone(timezone.utc)).total_seconds())
-        if sec < 60:
-            return f"{int(sec)}s ago"
-        if sec < 3600:
-            return f"{int(sec // 60)}m ago"
-        if sec < 86400:
-            return f"{int(sec // 3600)}h ago"
-        return f"{int(sec // 86400)}d ago"
-    except Exception:
-        return iso_ts
+# --- Data fetchers (cached) ---------------------------------------------------
 
-def _mode_chip(api_mode: bool) -> str:
-    """Small pill to show whether we're using API mode or Badge mode."""
-    txt = "API mode" if api_mode else "Badge mode"
-    bg  = "#16a34a" if api_mode else "#f59e0b"    # green / amber
-    icon = "🔑 " if api_mode else "🛈 "
+@st.cache_data(ttl=60)
+def fetch_from_api(owner: str, repo: str, workflow_file: str) -> Optional[Tuple[str, str]]:
+    """Return (conclusion, last_run_iso) using GitHub API if token present."""
+    token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
+    if not token:
+        return None
+    url = (
+        f"https://api.github.com/repos/{owner}/{repo}"
+        f"/actions/workflows/{workflow_file}/runs?per_page=1"
+    )
+    r = requests.get(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+        },
+        timeout=TIMEOUT,
+    )
+    if r.status_code != 200:
+        return None
+    data = r.json()
+    runs = data.get("workflow_runs") or []
+    if not runs:
+        return None
+    run = runs[0]
+    conclusion = run.get("conclusion") or run.get("status")
+    last_run = run.get("updated_at") or run.get("created_at") or ""
+    return (conclusion or "unknown", last_run)
+
+
+@st.cache_data(ttl=60)
+def fetch_from_badge(badge_url: str) -> Optional[str]:
+    """Fetch badge SVG and return 'passing'/'failing'/etc. if detectable."""
+    r = requests.get(badge_url, timeout=TIMEOUT)
+    if r.status_code != 200:
+        return None
+    svg = r.text.lower()
+    if "passing" in svg:
+        return "passing"
+    if "failing" in svg:
+        return "failing"
+    if "failure" in svg:
+        return "failure"
+    if "cancelled" in svg:
+        return "cancelled"
+    if "skipped" in svg:
+        return "skipped"
+    return "unknown"
+
+
+def ci_status_for(name: str, wf_file: str) -> CiStatus:
+    """Combine API (preferred) or badge fallback into a unified status row."""
+    api = fetch_from_api(OWNER, REPO, wf_file)
+    if api:
+        conclusion, last_run = api
+        state = map_conclusion_to_state(conclusion)
+        return CiStatus(
+            name=name,
+            state=state,
+            detail=conclusion or "unknown",
+            url=f"{ACTIONS_LINK}/workflows/{wf_file}",
+            last_run=last_run,
+        )
+
+    # Fallback: badge parse
+    badge = fetch_from_badge(BADGES[name])
+    detail = badge or "unknown"
+    if detail in ("passing", "success"):
+        state = "success"
+    elif detail in ("failing", "failure"):
+        state = "failure"
+    elif detail in ("cancelled", "skipped"):
+        state = detail
+    else:
+        state = "unknown"
+
+    return CiStatus(
+        name=name,
+        state=state,
+        detail=detail,
+        url=f"{ACTIONS_LINK}/workflows/{wf_file}",
+        last_run=None,
+    )
+
+
+# --- UI helpers ---------------------------------------------------------------
+
+def pill(text: str, state: str) -> str:
+    colors = {
+        "success": "#16a34a",   # green-600
+        "failure": "#dc2626",   # red-600
+        "cancelled": "#9ca3af", # gray-400
+        "skipped": "#9ca3af",
+        "unknown": "#f59e0b",   # amber-500
+    }
+    bg = colors.get(state, "#f59e0b")
     return f"""
     <span style="
-      display:inline-block;margin-left:.5rem;
-      background:{bg};color:#fff;border-radius:999px;
-      padding:3px 10px;font-weight:600;font-size:.85rem;">
-      {icon}{txt}
+      background:{bg};
+      color:white;
+      padding:4px 10px;
+      border-radius:999px;
+      font-weight:600;
+      font-size:0.85rem;">
+      {text}
     </span>
     """
 
-# ------------------------- Data -------------------------
 
-@st.cache_data(ttl=60, show_spinner=False)
-def fetch_api_statuses(owner: str, repo: str, token: Optional[str]) -> Dict[str, CiStatus]:
-    """Fetch latest workflow run status via GitHub API; return {} if not available."""
-    headers = _api_headers(token)
-    url = f"https://api.github.com/repos/{owner}/{repo}/actions/runs?per_page=100"
-    try:
-        resp = requests.get(url, headers=headers, timeout=15)
-        if resp.status_code != 200:
-            return {}
-        runs = (resp.json() or {}).get("workflow_runs", [])
-    except Exception:
-        return {}
+# --- App ----------------------------------------------------------------------
 
-    # newest run per workflow file
-    latest_by_wf: Dict[str, dict] = {}
-    for run in runs:
-        wf_path = (run.get("path") or "").split("/")[-1]
-        if not wf_path:
-            continue
-        prev = latest_by_wf.get(wf_path)
-        if not prev or (run.get("updated_at") or "") >= (prev.get("updated_at") or ""):
-            latest_by_wf[wf_path] = run
+def main() -> None:
+    st.set_page_config(page_title="Milkbox AI — War Room", page_icon="🛠️", layout="wide")
 
-    out: Dict[str, CiStatus] = {}
-    for name, wf_file in WORKFLOWS.items():
-        run = latest_by_wf.get(wf_file)
-        if not run:
-            continue
-        conclusion = (run.get("conclusion") or run.get("status") or "unknown").lower()
-        if conclusion == "completed" and run.get("conclusion"):
-            conclusion = run.get("conclusion", "unknown").lower()
-        out[name] = CiStatus(
-            name=name,
-            conclusion=conclusion,
-            updated_at=run.get("updated_at") or run.get("run_started_at"),
-            url=run.get("html_url"),
-            source="api",
-        )
-    return out
+    st.title("🛠️ War Room")
+    st.caption("Live CI snapshot for the Milkbox AI repository.")
 
-@st.cache_data(ttl=60, show_spinner=False)
-def fetch_badge_status(owner: str, repo: str, wf_file: str) -> CiStatus:
-    # tiny retry for flaky network
-    url = _badge_url(owner, repo, wf_file)
-    conclusion = "unknown"
-    for _ in range(2):
-        try:
-            r = requests.get(url, timeout=10)
-            if r.status_code == 200:
-                conclusion = _badge_conclusion(r.text)
-                break
-        except Exception:
-            time.sleep(0.2)
-    return CiStatus(
-        name=wf_file,
-        conclusion=conclusion,
-        updated_at=None,
-        url=f"https://github.com/{owner}/{repo}/actions/workflows/{wf_file}",
-        source="badge",
-    )
+    col_a, col_b = st.columns([1, 1], gap="large")
 
-def _merge_api_badges(api_statuses: Dict[str, CiStatus]) -> Dict[str, CiStatus]:
-    merged: Dict[str, CiStatus] = {}
-    for name in WORKFLOW_ORDER:
-        wf = WORKFLOWS[name]
-        if name in api_statuses:
-            merged[name] = api_statuses[name]
-        else:
-            badge = fetch_badge_status(OWNER, REPO, wf)
-            merged[name] = CiStatus(
-                name=name,
-                conclusion=badge.conclusion,
-                updated_at=None,
-                url=badge.url,
-                source="badge",
+    with col_a:
+        st.subheader("CI Status")
+        rows = [ci_status_for(name, wf) for name, wf in WORKFLOWS.items()]
+        for s in rows:
+            st.markdown(
+                f"**{s.name}** &nbsp; {pill(s.state.upper(), s.state)}",
+                unsafe_allow_html=True,
             )
-    return merged
+            sub = f"- Status: `{s.detail}`"
+            if s.last_run:
+                sub += f"  ·  Last run: `{s.last_run}`"
+            sub += f"  ·  [View runs]({s.url})"
+            st.markdown(sub)
 
-def _issues_link() -> str:
-    return f"https://github.com/{OWNER}/{REPO}/issues"
+        st.link_button("Open Actions", ACTIONS_LINK, use_container_width=True)
 
-def _actions_link() -> str:
-    return f"https://github.com/{OWNER}/{REPO}/actions"
+        if st.button("🔄 Refresh", use_container_width=True):
+            fetch_from_api.clear()
+            fetch_from_badge.clear()
+            st.experimental_rerun()
 
-# ------------------------- UI -------------------------
-
-def _status_bar(statuses: Dict[str, CiStatus]) -> None:
-    n = max(1, len(WORKFLOW_ORDER))  # guard: never zero columns
-    cols = st.columns(n)
-    for i, name in enumerate(WORKFLOW_ORDER):
-        st_status = statuses.get(name)
-        with cols[min(i, n - 1)]:
-            if not st_status:
-                st.metric(label=name, value="❔ unknown")
-                continue
-            emoji = _status_emoji(st_status.conclusion)
-            age = _age_text(st_status.updated_at)
-            st.metric(label=name, value=f"{emoji} {st_status.conclusion}")
-            if st_status.url:
-                st.caption(f"{age} · [open run]({st_status.url}) · via {st_status.source}")
-
-def render() -> None:
-    """Entrypoint for Streamlit (and for Smoke contract)."""
-    st.set_page_config(page_title="War Room · Milkbox AI", page_icon="🛠️", layout="wide")
-
-    # Detect once and show mode chip in the title
-    token = _env_token()
-    api_mode = bool(token)
-    st.markdown(
-        f"<h1 style='display:inline'>🛠️ War Room</h1>{_mode_chip(api_mode)}",
-        unsafe_allow_html=True,
-    )
-    st.caption("CI overview for Repo Doctor · Smoke · Repo Health · Repo Steward · CodeQL")
-
-    left, mid, right = st.columns([1, 1, 3])
-    with left:
-        if st.button("🔄 Refresh", help="Re-pull without clearing cache", use_container_width=True):
-            st.rerun()
-    with mid:
-        if st.button("♻️ Hard refresh", help="Clear Streamlit cache then reload", use_container_width=True):
-            fetch_api_statuses.clear()
-            fetch_badge_status.clear()
-            st.rerun()
-    with right:
-        st.link_button("🧪 Open Actions", _actions_link(), use_container_width=True)
-
-    st.link_button("🐞 Open Issues", _issues_link(), use_container_width=True)
+    with col_b:
+        st.subheader("Tips")
+        st.markdown(
+            """
+            - Set a **`GITHUB_TOKEN`** environment variable when running locally to see exact conclusions and timestamps.
+            - Branch protection on **`main`** requires Repo Doctor, Smoke, and Repo Health ✅.
+            - Add new tools under `streamlit_app/tools/` and register them in `tools.yaml`.
+            """
+        )
 
     st.divider()
+    st.caption("Milkbox AI · War Room · CI view")
 
-    if api_mode:
-        st.info("Using GitHub API (token detected) for precise status and timestamps.", icon="🔑")
-    else:
-        st.warning(
-            "No GITHUB_TOKEN detected. Falling back to badge parsing (less precise). "
-            "Set GITHUB_TOKEN for richer details.",
-            icon="ℹ️",
-        )
 
-    api = fetch_api_statuses(OWNER, REPO, token if api_mode else None)
-    statuses = _merge_api_badges(api)
+# ----- Contract for tools loader / smoke -----
+def render(*_args, **_kwargs):
+    """Required entrypoint for the tools loader."""
+    return main()
 
-    _status_bar(statuses)
 
-    with st.expander("Details"):
-        st.json({
-            n: {
-                "conclusion": s.conclusion,
-                "updated_at": s.updated_at,
-                "updated_age": _age_text(s.updated_at),
-                "url": s.url,
-                "source": s.source,
-            } for n, s in statuses.items()
-        })
-
-    st.caption("Tip: export a personal access token as GITHUB_TOKEN for more accurate reporting.")
-
+# --- Entrypoint for local runs ------------------------------------------------
 if __name__ == "__main__":
-    render()
+    main()
+
