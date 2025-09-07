@@ -96,6 +96,20 @@ def _age_text(iso_ts: Optional[str]) -> str:
     except Exception:
         return iso_ts
 
+def _mode_chip(api_mode: bool) -> str:
+    """Small pill to show whether we're using API mode or Badge mode."""
+    txt = "API mode" if api_mode else "Badge mode"
+    bg  = "#16a34a" if api_mode else "#f59e0b"    # green / amber
+    icon = "🔑 " if api_mode else "🛈 "
+    return f"""
+    <span style="
+      display:inline-block;margin-left:.5rem;
+      background:{bg};color:#fff;border-radius:999px;
+      padding:3px 10px;font-weight:600;font-size:.85rem;">
+      {icon}{txt}
+    </span>
+    """
+
 # ------------------------- Data -------------------------
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -203,18 +217,24 @@ def render() -> None:
     """Entrypoint for Streamlit (and for Smoke contract)."""
     st.set_page_config(page_title="War Room · Milkbox AI", page_icon="🛠️", layout="wide")
 
-    st.title("🛠️ War Room")
+    # Detect once and show mode chip in the title
+    token = _env_token()
+    api_mode = bool(token)
+    st.markdown(
+        f"<h1 style='display:inline'>🛠️ War Room</h1>{_mode_chip(api_mode)}",
+        unsafe_allow_html=True,
+    )
     st.caption("CI overview for Repo Doctor · Smoke · Repo Health · Repo Steward · CodeQL")
 
     left, mid, right = st.columns([1, 1, 3])
     with left:
         if st.button("🔄 Refresh", help="Re-pull without clearing cache", use_container_width=True):
-            st.rerun()  # ← updated
+            st.rerun()
     with mid:
         if st.button("♻️ Hard refresh", help="Clear Streamlit cache then reload", use_container_width=True):
             fetch_api_statuses.clear()
             fetch_badge_status.clear()
-            st.rerun()  # ← updated
+            st.rerun()
     with right:
         st.link_button("🧪 Open Actions", _actions_link(), use_container_width=True)
 
@@ -222,8 +242,7 @@ def render() -> None:
 
     st.divider()
 
-    token = _env_token()
-    if token:
+    if api_mode:
         st.info("Using GitHub API (token detected) for precise status and timestamps.", icon="🔑")
     else:
         st.warning(
@@ -232,7 +251,7 @@ def render() -> None:
             icon="ℹ️",
         )
 
-    api = fetch_api_statuses(OWNER, REPO, token)
+    api = fetch_api_statuses(OWNER, REPO, token if api_mode else None)
     statuses = _merge_api_badges(api)
 
     _status_bar(statuses)
