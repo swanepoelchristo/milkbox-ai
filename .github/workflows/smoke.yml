@@ -1,10 +1,17 @@
 name: Smoke (Imports)
 
 on:
+  push:
+    branches: [ main ]
+    paths:
+      - "tools.yaml"
+      - "scripts/**.py"
+      - "streamlit_app/tools/**"
+      - ".github/workflows/smoke.yml"
   pull_request:
     paths:
       - "tools.yaml"
-      - "scripts/smoke_tools.py"
+      - "scripts/**.py"
       - "streamlit_app/tools/**"
       - ".github/workflows/smoke.yml"
   workflow_dispatch:
@@ -29,8 +36,9 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           else
-            pip install pyyaml
+            # minimal deps so the loader and streamlit imports don't fail
+            pip install pyyaml streamlit
           fi
 
-      - name: Run smoke
-        run: python scripts/smoke_tools.py
+      - name: Run smoke (imports)
+        run: python scripts/test_imports.py
