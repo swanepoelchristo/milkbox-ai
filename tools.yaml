@@ -51,3 +51,10 @@ tools:
     module: streamlit_app.tools.war_room
     section: Pro
     description: Central command dashboard for managers and agents
+
+  - key: my_tool
+    label: My Tool
+    module: streamlit_app.tools.my_tool
+    section: Free         # or Pro / Demos
+    description: Optional one-liner about what this tool does
+
