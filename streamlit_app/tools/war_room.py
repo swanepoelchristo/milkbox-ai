@@ -209,12 +209,12 @@ def render() -> None:
     left, mid, right = st.columns([1, 1, 3])
     with left:
         if st.button("🔄 Refresh", help="Re-pull without clearing cache", use_container_width=True):
-            st.experimental_rerun()
+            st.rerun()  # ← updated
     with mid:
         if st.button("♻️ Hard refresh", help="Clear Streamlit cache then reload", use_container_width=True):
             fetch_api_statuses.clear()
             fetch_badge_status.clear()
-            st.experimental_rerun()
+            st.rerun()  # ← updated
     with right:
         st.link_button("🧪 Open Actions", _actions_link(), use_container_width=True)
 
