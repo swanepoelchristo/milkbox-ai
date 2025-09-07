@@ -36,6 +36,16 @@ tools:
     module: streamlit_app.tools.demo_2
     section: Demos
 
+  - key: builder
+    label: Builder
+    module: streamlit_app.tools.builder
+    section: Free
+
+  - key: food_safety
+    label: Food Safety
+    module: streamlit_app.tools.food_safety
+    section: Free
+
   - key: war_room
     label: War Room
     module: streamlit_app.tools.war_room
