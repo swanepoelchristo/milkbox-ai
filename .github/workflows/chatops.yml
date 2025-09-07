@@ -38,7 +38,7 @@ jobs:
           esac
 
       - name: Checkout default branch (full history; no auto creds)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ env.DEFAULT_BRANCH }}
           fetch-depth: 0
@@ -73,7 +73,7 @@ jobs:
               name: Smoke (Imports)
               runs-on: ubuntu-latest
               steps:
-                - uses: actions/checkout@v4
+                - uses: actions/checkout@v5
                 - uses: actions/setup-python@v5
                   with: { python-version: '3.11' }
                 - name: Install minimal deps
@@ -88,7 +88,7 @@ jobs:
               name: Repo Health
               runs-on: ubuntu-latest
               steps:
-                - uses: actions/checkout@v4
+                - uses: actions/checkout@v5
                 - name: Basic repo checks
                   run: |
                     set -e
