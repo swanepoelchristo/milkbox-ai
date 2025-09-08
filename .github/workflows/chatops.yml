@@ -74,7 +74,7 @@ jobs:
               runs-on: ubuntu-latest
               steps:
                 - uses: actions/checkout@v4
-                - uses: actions/setup-python@v5
+                - uses: actions/setup-python@v6
                   with: { python-version: '3.11' }
                 - name: Install minimal deps
                   run: |
@@ -94,7 +94,7 @@ jobs:
                     set -e
                     test -f CODEOWNERS || { echo "❌ Missing CODEOWNERS at repo root"; exit 1; }
                     echo "✅ CODEOWNERS present"
-                - uses: actions/setup-python@v5
+                - uses: actions/setup-python@v6
                   with: { python-version: '3.11' }
                 - name: Install pre-commit
                   run: pip install pre-commit
@@ -243,7 +243,7 @@ jobs:
 
       - name: Setup Python
         if: contains(env.COMMENT_BODY, '/house-diagnose') || contains(env.COMMENT_BODY, '/house-fix')
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
           cache: 'pip'
