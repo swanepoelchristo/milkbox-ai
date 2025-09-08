@@ -62,7 +62,7 @@ jobs:
 
       - name: Create or update 'Repo Health' issue
         if: ${{ steps.report.outputs.exit_code != '0' || github.event.inputs.update_issue == 'true' || github.event_name == 'schedule' || github.event_name == 'pull_request' || github.event_name == 'push' }}
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const fs = require('fs');
