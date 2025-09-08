@@ -2,3 +2,7 @@
 __pycache__/
 *.pyc
 
+
+# Leads data (local)
+data/*.csv
+
