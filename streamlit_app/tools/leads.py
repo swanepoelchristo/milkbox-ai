@@ -1,199 +1,283 @@
-# streamlit_app/tools/leads.py
-"""
-CSV-backed Leads Tracker (Streamlit)
-
-- Saves to: data/leads.csv  (ignored by git; add `data/*.csv` to .gitignore)
-- Designed to be import-safe for CI smoke (no code runs at import time).
-- If pandas isn't installed, the app shows an instruction instead of crashing.
-
-Quick run:
-    python -m streamlit run streamlit_app/tools/leads.py
-"""
-
 from __future__ import annotations
 from pathlib import Path
 from datetime import datetime
+import os, re, sqlite3
 import streamlit as st
 
-# Lazy/optional pandas for CI import safety
+# Optional .env support (safe if not installed)
+try:
+    from dotenv import load_dotenv  # type: ignore
+    load_dotenv()
+except Exception:
+    pass
+
+# Lazy imports so CI can import without extras
 try:
     import pandas as pd  # type: ignore
-except Exception:  # pragma: no cover
+except Exception:
     pd = None  # type: ignore
 
+try:
+    from supabase import create_client  # type: ignore
+except Exception:
+    create_client = None  # type: ignore
+
+from streamlit_app.tools._common import about  # our reusable About/How-to block
+
 DATA_DIR = Path("data")
-DATA_FILE = DATA_DIR / "leads.csv"
+CSV_FILE = DATA_DIR / "leads.csv"
+SQLITE_FILE = DATA_DIR / "leads.db"
+SQLITE_TABLE = "leads"
+SUPABASE_TABLE = "leads"
 
-COLUMNS = ["created_at", "name", "email", "company", "source", "status", "notes"]
-STATUS_CHOICES = ["New", "Contacted", "Qualified", "Won", "Lost"]
-SOURCE_CHOICES = ["Website", "Referral", "LinkedIn", "Inbound", "Outbound", "Event", "Other"]
+COLUMNS = ["created_at","name","email","company","source","status","notes"]
+STATUS_CHOICES = ["New","Contacted","Qualified","Won","Lost"]
+SOURCE_CHOICES = ["Website","Referral","LinkedIn","Inbound","Outbound","Event","Other"]
 
+# ---------- utils ----------
+def _valid_email(s: str) -> bool:
+    if not s: return True
+    return bool(re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", s.strip()))
 
-# ---------- Storage helpers ----------
 def _empty_df():
     assert pd is not None, "pandas required at runtime"
     return pd.DataFrame(columns=COLUMNS)  # type: ignore[attr-defined]
 
-
 def _ensure_schema(df):
-    """Add any missing columns and enforce column order."""
     for c in COLUMNS:
-        if c not in df.columns:
-            df[c] = ""
-    # reorder safely
+        if c not in df.columns: df[c] = ""
     return df[[c for c in COLUMNS if c in df.columns]]
 
-
-def _load_df():
-    """Read CSV if present; otherwise return an empty DataFrame."""
+# ---------- CSV ----------
+def _load_df_csv():
     assert pd is not None, "pandas required at runtime"
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    if not DATA_FILE.exists():
-        return _empty_df()
-
+    if not CSV_FILE.exists(): return _empty_df()
     try:
-        df = pd.read_csv(DATA_FILE)  # type: ignore[attr-defined]
+        df = pd.read_csv(CSV_FILE)  # type: ignore[attr-defined]
     except Exception as e:
-        st.error(f"Couldn't read {DATA_FILE}: {e}")
-        st.info("Starting with a new empty table. (Tip: close the CSV in Excel if it's open.)")
+        st.error(f"Couldn't read {CSV_FILE}: {e}")
+        st.info("Close it in Excel if open. Starting empty.")
         return _empty_df()
     return _ensure_schema(df)
 
-
-def _save_df(df):
-    """Persist CSV with friendly error messages."""
+def _save_df_csv(df):
     try:
-        df.to_csv(DATA_FILE, index=False)  # type: ignore[attr-defined]
-        st.success(f"Saved to {DATA_FILE}", icon="✅")
+        df.to_csv(CSV_FILE, index=False)  # type: ignore[attr-defined]
+        st.toast(f"Saved to {CSV_FILE}", icon="✅")
     except PermissionError:
-        st.error("Save failed: the CSV is probably open in another program (e.g., Excel). Close it and try again.")
+        st.error("Save failed: CSV locked by another program (Excel). Close it and click **Retry save**.")
     except Exception as e:
         st.error(f"Save failed: {e}")
 
+# ---------- SQLite ----------
+def _init_sqlite():
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(str(SQLITE_FILE))
+    con.execute(f"""
+        CREATE TABLE IF NOT EXISTS {SQLITE_TABLE} (
+            created_at TEXT, name TEXT, email TEXT UNIQUE, company TEXT,
+            source TEXT, status TEXT, notes TEXT
+        )
+    """)
+    return con
+
+def _load_df_sqlite():
+    assert pd is not None, "pandas required at runtime"
+    con = _init_sqlite()
+    try:
+        df = pd.read_sql_query(f"SELECT * FROM {SQLITE_TABLE}", con)  # type: ignore[attr-defined]
+    finally:
+        con.close()
+    return _ensure_schema(df)
+
+def _save_df_sqlite(df):
+    con = _init_sqlite()
+    try:
+        con.execute(f"DELETE FROM {SQLITE_TABLE}"); con.commit()
+        df.to_sql(SQLITE_TABLE, con, if_exists="append", index=False)  # type: ignore[attr-defined]
+        st.toast(f"Saved to {SQLITE_FILE}", icon="✅")
+    except Exception as e:
+        st.error(f"Save failed: {e}")
+    finally:
+        con.close()
+
+# ---------- Supabase ----------
+def _get_supabase_client():
+    url = os.environ.get("SUPABASE_URL")
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_KEY") or os.environ.get("SUPABASE_ANON_KEY")
+    if create_client is None: return None, 'Install client: pip install "supabase>=2,<3"'
+    if not url or not key: return None, "Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in your environment."
+    try:
+        return create_client(url, key), None
+    except Exception as e:
+        return None, f"Could not create Supabase client: {e}"
+
+def _load_df_supabase():
+    assert pd is not None, "pandas required at runtime"
+    client, err = _get_supabase_client()
+    if err: st.warning(err); return _empty_df()
+    try:
+        res = client.table(SUPABASE_TABLE).select("*").execute()
+        df = pd.DataFrame(res.data or [])  # type: ignore[attr-defined]
+        return _ensure_schema(df)
+    except Exception as e:
+        st.error(f"Failed to load from Supabase: {e}")
+        return _empty_df()
+
+def _save_df_supabase(df):
+    client, err = _get_supabase_client()
+    if err: st.error(err); return
+    try:
+        up = df.copy()
+        if "email" in up.columns:
+            up["email"] = up["email"].astype(str).str.strip().str.lower()
+        payload = up[COLUMNS].to_dict(orient="records")  # type: ignore[attr-defined]
+        client.table(SUPABASE_TABLE).upsert(payload, on_conflict="email").execute()
+        st.toast("Saved to Supabase", icon="✅")
+    except Exception as e:
+        st.error(f"Failed to save to Supabase: {e}")
 
 # ---------- UI ----------
 def app():
     st.title("Leads Tracker")
-    st.caption("Capture leads, filter/search, update status, and download CSV. File: `data/leads.csv`")
+    about(
+        description="Mini CRM for capturing leads. Backends: **CSV** (default), **SQLite** (local), **Supabase** (cloud).",
+        howto_md="""1. Fill **Add a lead** → **Add lead**.  
+2. Use **Filters** to search.  
+3. Edit inline in the table → **Apply edited changes**.  
+4. **Settings**: choose backend & duplicate handling.  
+5. **Download** CSV / **Upload** CSV / use **Retry save** if the CSV was locked.""",
+        deps_cmd='pip install streamlit pandas "supabase>=2,<3" python-dotenv',
+        notes="Local files live in `data/` and are ignored by git. Supabase table name: `leads`."
+    )
 
-    # Guard: require pandas for runtime
     if pd is None:
-        st.warning(
-            "This tool needs **pandas**. Install it, then refresh:\n\n"
-            "```bash\npip install pandas\n```"
-        )
+        st.warning("This tool needs **pandas**. Install and refresh:\n\n```bash\npip install pandas\n```")
         return
 
-    df = _load_df()
+    # Settings
+    with st.expander("Settings", expanded=False):
+        backend_label = st.selectbox("Storage backend", ["CSV (local)","SQLite (local)","Supabase (cloud)"], key="leads_backend")
+        dup_mode = st.radio("When a duplicate email is added", ["Update existing by email","Allow duplicate row"], horizontal=True, key="dup_mode")
+        require_valid = st.checkbox("Require valid email format", value=True, key="require_valid_email")
+        if backend_label.startswith("Supabase"):
+            if st.button("Test Supabase connection"):
+                client, err = _get_supabase_client()
+                st.success("Connected!") if client and not err else st.error(err or "Unknown error")
 
-    # First-run hint
-    if df.empty and not DATA_FILE.exists():
-        st.info("No leads yet. Add your first lead with the form below — the CSV will be created automatically.")
+    # Choose backend
+    if backend_label.startswith("CSV"):
+        load_df, save_df = _load_df_csv, _save_df_csv
+    elif backend_label.startswith("SQLite"):
+        load_df, save_df = _load_df_sqlite, _save_df_sqlite
+    else:
+        load_df, save_df = _load_df_supabase, _save_df_supabase
 
-    # --- New lead form
+    df = _ensure_schema(load_df())
+
+    # Add lead
     st.subheader("Add a lead")
     with st.form("new_lead", clear_on_submit=True):
-        col1, col2 = st.columns(2)
-        name = col1.text_input("Name*", placeholder="Jane Doe")
-        email = col2.text_input("Email", placeholder="jane@example.com")
-        company = col1.text_input("Company / Org", placeholder="Acme Ltd")
-        source = col2.selectbox("Source", SOURCE_CHOICES, index=0)
-        status = col1.selectbox("Status", STATUS_CHOICES, index=0)
+        c1, c2 = st.columns(2)
+        name = c1.text_input("Name*", placeholder="Jane Doe")
+        email = c2.text_input("Email", placeholder="jane@example.com")
+        company = c1.text_input("Company / Org", placeholder="Acme Ltd")
+        source = c2.selectbox("Source", SOURCE_CHOICES, index=0)
+        status = c1.selectbox("Status", STATUS_CHOICES, index=0)
         notes = st.text_area("Notes", placeholder="Context, next steps, etc.")
         submitted = st.form_submit_button("Add lead")
 
     if submitted:
         if not name.strip() and not email.strip():
-            st.error("Please add at least a **Name** or an **Email**.")
+            st.error("Please add at least a Name or an Email.")
+        elif require_valid and not _valid_email(email.strip()):
+            st.error("Email looks invalid.")
         else:
-            # simple de-dupe by email (if provided)
-            if email.strip():
-                exists = (df["email"].astype(str).str.lower() == email.strip().lower()).any()
-                if exists:
-                    st.warning("A lead with this email already exists. Saving a duplicate anyway.", icon="⚠️")
-
             row = {
                 "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
                 "name": name.strip(),
-                "email": email.strip(),
+                "email": email.strip().lower(),
                 "company": company.strip(),
                 "source": source,
                 "status": status,
                 "notes": notes.strip(),
             }
-            df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)  # type: ignore[attr-defined]
-            df = _ensure_schema(df)
-            _save_df(df)
-            st.success(f"Added lead: {row['name'] or row['email'] or '(no name)'}")
+            if row["email"]:
+                mask = df["email"].astype(str).str.lower() == row["email"]
+                if mask.any() and st.session_state.get("dup_mode") == "Update existing by email":
+                    idx = df[mask].index[0]
+                    for k in ["name","company","source","status","notes"]:
+                        df.loc[idx, k] = row[k]
+                    st.info("Updated existing lead by email.")
+                else:
+                    df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)  # type: ignore[attr-defined]
+                    st.success(f"Added: {row['name'] or row['email'] or '(no name)'}")
+            else:
+                df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)  # type: ignore[attr-defined]
+                st.success(f"Added: {row['name'] or '(no name)'}")
+            df = _ensure_schema(df); save_df(df)
 
-    # --- Filters
+    # Filters
     with st.expander("Filters", expanded=True):
         q = st.text_input("Search (name, email, company, notes)")
         status_filter = st.multiselect("Status", STATUS_CHOICES, default=STATUS_CHOICES)
         src_values = sorted([s for s in df["source"].dropna().unique().tolist() if s])
         source_filter = st.multiselect("Source", src_values, default=src_values)
-        if st.button("Reset filters"):
-            st.experimental_rerun()
+        if st.button("Reset filters"): st.rerun()
 
     filtered = df.copy()
     if q:
         ql = q.lower()
-        filtered = filtered[
-            filtered.apply(
-                lambda r: ql in " ".join(str(r[c]) for c in ["name", "email", "company", "notes"]).lower(), axis=1
-            )
-        ]
+        filtered = filtered[ filtered.apply(lambda r: ql in " ".join(str(r[c]) for c in ["name","email","company","notes"]).lower(), axis=1) ]
     if status_filter:
-        filtered = filtered[filtered["status"].isin(status_filter)]
+        filtered = filtered[ filtered["status"].isin(status_filter) ]
     if source_filter:
-        filtered = filtered[filtered["source"].isin(source_filter)]
+        filtered = filtered[ filtered["source"].isin(source_filter) ]
 
+    # Table + inline edit
     st.subheader(f"Leads ({len(filtered)})")
-    if filtered.empty:
-        st.info("No rows match your filters.")
-    st.dataframe(filtered, use_container_width=True)
+    if filtered.empty: st.info("No rows match your filters.")
+    edited = st.data_editor(filtered, key="leads_editor", use_container_width=True, height=350, num_rows="fixed")
+    if st.button("Apply edited changes"):
+        for idx in edited.index:
+            for col in COLUMNS:
+                if col in edited.columns:
+                    df.loc[idx, col] = edited.loc[idx, col]
+        df = _ensure_schema(df); save_df(df); st.success("Edits saved.")
 
-    # --- Download / Upload
-    st.write("### CSV")
-    csv_bytes = filtered.to_csv(index=False).encode("utf-8")
-    st.download_button("Download filtered CSV", csv_bytes, "leads.csv", "text/csv")
+    # Quick update
+    if not filtered.empty:
+        with st.expander("Quick Update"):
+            options = list(filtered.index)
+            labels = [f"{i}: {filtered.loc[i,'name']} [{filtered.loc[i,'status']}]"] if options else []
+            pick = st.selectbox("Pick a row", options, format_func=lambda i: labels[options.index(i)] if options else str(i))
+            new_status = st.selectbox("New status", STATUS_CHOICES)
+            c1, c2 = st.columns(2)
+            if c1.button("Update status"):
+                df.loc[pick,"status"] = new_status; save_df(df); st.success("Status updated!")
+            if c2.button("Delete selected row"):
+                df = df.drop(index=pick).reset_index(drop=True); save_df(df); st.success("Row deleted.")
 
+    # CSV export/import
+    st.write("### CSV export/import")
+    if pd is not None:
+        csv_bytes = filtered.to_csv(index=False).encode("utf-8")  # type: ignore[attr-defined]
+        st.download_button("Download filtered CSV", csv_bytes, "leads.csv", "text/csv")
     uploaded = st.file_uploader("Optional: upload a leads CSV to append", type=["csv"])
-    if uploaded is not None:
+    if uploaded is not None and pd is not None:
         try:
             add_df = pd.read_csv(uploaded)  # type: ignore[attr-defined]
             add_df = _ensure_schema(add_df)
             df = pd.concat([df, add_df], ignore_index=True)  # type: ignore[attr-defined]
-            df = _ensure_schema(df)
-            _save_df(df)
-            st.success(f"Imported {len(add_df)} rows from uploaded CSV.")
+            df = _ensure_schema(df); save_df(df); st.success(f"Imported {len(add_df)} rows.")
         except Exception as e:
             st.error(f"Import failed: {e}")
 
-    # --- Quick status update
-    if not df.empty:
-        st.subheader("Quick Update")
-        # Use filtered view for picking rows to update
-        options = list(filtered.index)
-        labels = [f"{i}: {filtered.loc[i, 'name']}  [{filtered.loc[i, 'status']}]" for i in options]
-        pick = st.selectbox("Pick a row", options, format_func=lambda i: labels[options.index(i)])
-        new_status = st.selectbox("New status", STATUS_CHOICES)
+    # Retry save
+    if st.button("Retry save"): save_df(df)
 
-        c1, c2 = st.columns(2)
-        if c1.button("Update status"):
-            df.loc[pick, "status"] = new_status
-            _save_df(df)
-            st.success("Status updated!")
-
-        if c2.button("Delete selected row"):
-            df = df.drop(index=pick)
-            df = df.reset_index(drop=True)
-            _save_df(df)
-            st.success("Row deleted.")
-
-    st.caption("Tip: If the page is blank when running directly, make sure this file ends with the "
-               "`if __name__ == '__main__': app()` block.")
-
+    st.caption("Backends: CSV / SQLite / Supabase. Local data in `data/` is ignored by git.")
 
 if __name__ == "__main__":
     app()
