@@ -55,6 +55,12 @@ tools:
   - key: my_tool
     label: My Tool
     module: streamlit_app.tools.my_tool
-    section: Free         # or Pro / Demos
-    description: Optional one-liner about what this tool does
+    section: Free
+    description: Starter template with inputs, options, and a Run button
+
+  - key: new_tool
+    label: New Tool
+    module: streamlit_app.tools.new_tool
+    section: Free
+    description: Hello from new_tool!
 
