@@ -6,3 +6,8 @@ __pycache__/
 # Leads data (local)
 data/*.csv
 
+
+# Local data and secrets
+data/*.csv
+data/*.db
+.env
