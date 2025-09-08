@@ -147,7 +147,7 @@ jobs:
 
       - name: Open PR for bootstrap
         if: contains(env.COMMENT_BODY, '/bootstrap-ci')
-        uses: peter-evans/create-pull-request@v6
+        uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ env.CHATOPS_TOKEN }}
           base: ${{ env.DEFAULT_BRANCH }}
@@ -206,7 +206,7 @@ jobs:
       - name: Create or update PR (reuse if open; reopen if closed)
         id: pr
         if: contains(env.COMMENT_BODY, '/open-test-pr')
-        uses: peter-evans/create-pull-request@v6
+        uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           base: ${{ env.DEFAULT_BRANCH }}
@@ -357,7 +357,7 @@ jobs:
       - name: Open PR with fix
         if: contains(env.COMMENT_BODY, '/house-fix') && steps.prepare_fix.outputs.changed == 'true'
         id: fixpr
-        uses: peter-evans/create-pull-request@v6
+        uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ env.CHATOPS_TOKEN }}
           base: ${{ env.DEFAULT_BRANCH }}
