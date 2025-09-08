@@ -64,3 +64,10 @@ tools:
     section: Free
     description: Hello from new_tool!
 
+  - key: leads
+    label: Leads Tracker
+    module: streamlit_app.tools.leads
+    section: Free
+    description: Capture and manage simple leads with filters and CSV export.
+
+
