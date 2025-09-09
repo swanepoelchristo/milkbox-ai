@@ -23,7 +23,7 @@ try:
 except Exception:
     create_client = None  # type: ignore
 
-# Reusable About/How-to block (fallback if helper missing)
+# About/How-to helper (fallback if shared helper missing)
 try:
     from streamlit_app.tools._common import about  # type: ignore
 except Exception:
@@ -48,7 +48,7 @@ COLUMNS = ["created_at", "name", "email", "company", "source", "status", "notes"
 STATUS_CHOICES = ["New", "Contacted", "Qualified", "Won", "Lost"]
 SOURCE_CHOICES = ["Website", "Referral", "LinkedIn", "Inbound", "Outbound", "Event", "Other"]
 
-# ---------- utils ----------
+# ---------- utilities ----------
 def _valid_email(s: str) -> bool:
     if not s:
         return True
@@ -244,7 +244,7 @@ def app():
             }
             if row["email"]:
                 mask = df["email"].astype(str).str.lower() == row["email"]
-                if mask.any() and st.session_state.get("dup_mode") == "Update existing by email":
+                if mask.any() and dup_mode == "Update existing by email":
                     idx = df[mask].index[0]
                     for k in ["name", "company", "source", "status", "notes"]:
                         df.loc[idx, k] = row[k]
@@ -300,11 +300,14 @@ def app():
     if not filtered.empty:
         with st.expander("Quick Update"):
             options = list(filtered.index)
-            labels = [f"{i}: {filtered.loc[i,'name']} [{filtered.loc[i,'status']}]"] if options else []
+            labels_map = {
+                i: f"{filtered.loc[i, 'name'] or '(no name)'} [{filtered.loc[i, 'status']}]"
+                for i in options
+            }
             pick = st.selectbox(
                 "Pick a row",
                 options,
-                format_func=lambda i: labels[options.index(i)] if options else str(i),
+                format_func=lambda i: labels_map.get(i, str(i)),
             )
             new_status = st.selectbox("New status", STATUS_CHOICES)
             c1, c2 = st.columns(2)
