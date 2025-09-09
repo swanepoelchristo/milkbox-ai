@@ -1,0 +1,53 @@
+name: Build Tool (from War Room)
+on:
+  repository_dispatch:
+    types: [new_tool]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: pip install pyyaml
+      - name: Generate files
+        env:
+          KEY: ${{ github.event.client_payload.key }}
+          LABEL: ${{ github.event.client_payload.label }}
+          SECTION: ${{ github.event.client_payload.section }}
+          DESC: ${{ github.event.client_payload.description }}
+          CODE: ${{ github.event.client_payload.code }}
+        run: |
+          python - <<'PY'
+          import os, pathlib, yaml
+          root = pathlib.Path.cwd()
+          key = (os.environ.get('KEY') or 'tool').strip()
+          label = (os.environ.get('LABEL') or key.title()).strip()
+          section = (os.environ.get('SECTION') or 'Pro').strip()
+          desc = os.environ.get('DESC') or ''
+          code = os.environ.get('CODE') or ''
+          tools_dir = root/'streamlit_app'/'tools'
+          tools_dir.mkdir(parents=True, exist_ok=True)
+          (tools_dir/'__init__.py').touch()
+          if not code.strip():
+              code = f'''from __future__ import annotations
+import streamlit as st
+try:
+    from streamlit_app.tools._common import about
+except Exception:
+    def about(d,h,deps=None,notes=None):
+        with st.expander("About / How to", expanded=False):
+            st.markdown(d); st.markdown("**How to use**"); st.markdown(h)
+            if deps: st.code(deps, language="bash")
+            if notes: st.info(notes)
+def app():
+    about("**{label}**", "1) Fill form → Run  \n2) Verify CI passes", "pip install streamlit pandas", "Local data in `data/` is gitignored.")
+    st.title("{label}")
+    st.write("Hello from {label}!")
+if __name__ == "__main
