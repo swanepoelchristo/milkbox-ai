@@ -1,5 +1,11 @@
-- key: leads
-  label: Leads Tracker
+﻿- key: leads
   module: streamlit_app.tools.leads
-  section: Pro
-  description: Track leads (CSV/SQLite/Supabase). Name, email, company, source, status, notes.
+  label: Leads
+  section: CRM
+  description: Manage and review captured leads
+
+- key: hello
+  module: streamlit_app.tools.hello
+  label: Hello
+  section: Tests
+  description: Simple hello tool to verify War Room PRs

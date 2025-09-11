@@ -1,8 +1,8 @@
 import streamlit as st
 
-TOOL_NAME = "Hello"
+def app():
+    st.title("Hello Tool")
+    st.write("Hello from MilkBox AI")
 
-def render():
-    st.title("👋 Hello Tool")
-    st.success("Importer v2 path is live. This is the first draft of `hello`.\n\nBuild your UI here.")
-    st.caption("Tip: Each tool lives at streamlit_app/tools/<name>.py and must expose render().")
+if __name__ == "__main__":
+    app()
