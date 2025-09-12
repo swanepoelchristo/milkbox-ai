@@ -1,24 +1,34 @@
 name: PR Nurse
 
+permissions:
+  contents: read
+  pull-requests: write
+
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, reopened, synchronize, ready_for_review]
+  # Helps reliability for PRs created inside the same repo
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
 
 jobs:
   review:
-    if: ${{ !github.event.pull_request.draft }}
+    # Skip drafts; avoid running on forks for safety
+    if: ${{ !github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+
     steps:
       - uses: actions/checkout@v4
 
       - name: Gather diff
         run: |
           git fetch origin ${{ github.base_ref }} --depth=1
-          git diff origin/${{ github.base_ref }}...HEAD --unified=0 > diff.txt
+          git diff origin/${{ github.base_ref }}...HEAD --unified=0 > diff.txt || true
 
       - name: Build prompt
         run: |
-          echo 'You are PR Nurse. Review this Git diff. Identify bugs, security issues, duplicated logic, and missing tests. Propose exact unit test names and snippets. Finish with a merge checklist.' > prompt.txt
+          echo 'You are PR Nurse. Review this Git diff. Identify bugs, security risks, duplicate logic, and missing tests. Propose exact unit test names and short snippets. End with a merge checklist.' > prompt.txt
           echo '--- DIFF START ---' >> prompt.txt
           head -c 150000 diff.txt >> prompt.txt
           echo '\n--- DIFF END ---' >> prompt.txt
@@ -30,15 +40,15 @@ jobs:
           python - <<'PY'
 import os, json, urllib.request
 prompt = open('prompt.txt','r',encoding='utf-8',errors='ignore').read()
-data = json.dumps({
+data = {
   "model": "gpt-4o-mini",
   "messages": [{"role":"user","content": prompt}],
   "temperature": 0.2,
   "max_tokens": 800
-}).encode()
+}
 req = urllib.request.Request(
   "https://api.openai.com/v1/chat/completions",
-  data=data,
+  data=json.dumps(data).encode(),
   headers={"Authorization":"Bearer "+os.environ["OPENAI_API_KEY"],
            "Content-Type":"application/json"}
 )
