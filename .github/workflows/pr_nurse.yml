@@ -1,34 +1,24 @@
 name: PR Nurse
 
-permissions:
-  contents: read
-  pull-requests: write
-
 on:
   pull_request:
-    types: [opened, reopened, synchronize, ready_for_review]
-  # Helps reliability for PRs created inside the same repo
-  pull_request_target:
-    types: [opened, reopened, synchronize, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review]
 
 jobs:
   review:
-    # Skip drafts; avoid running on forks for safety
-    if: ${{ !github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository }}
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-
     steps:
       - uses: actions/checkout@v4
 
       - name: Gather diff
         run: |
           git fetch origin ${{ github.base_ref }} --depth=1
-          git diff origin/${{ github.base_ref }}...HEAD --unified=0 > diff.txt || true
+          git diff origin/${{ github.base_ref }}...HEAD --unified=0 > diff.txt
 
       - name: Build prompt
         run: |
-          echo 'You are PR Nurse. Review this Git diff. Identify bugs, security risks, duplicate logic, and missing tests. Propose exact unit test names and short snippets. End with a merge checklist.' > prompt.txt
+          echo 'You are PR Nurse. Review this Git diff. Identify bugs, security risks, duplicate logic, and missing tests. Propose exact unit test names and snippets. Finish with a merge checklist.' > prompt.txt
           echo '--- DIFF START ---' >> prompt.txt
           head -c 150000 diff.txt >> prompt.txt
           echo '\n--- DIFF END ---' >> prompt.txt
@@ -37,27 +27,25 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          python - <<'PY'
-import os, json, urllib.request
-prompt = open('prompt.txt','r',encoding='utf-8',errors='ignore').read()
-data = {
-  "model": "gpt-4o-mini",
-  "messages": [{"role":"user","content": prompt}],
-  "temperature": 0.2,
-  "max_tokens": 800
-}
-req = urllib.request.Request(
-  "https://api.openai.com/v1/chat/completions",
-  data=json.dumps(data).encode(),
-  headers={"Authorization":"Bearer "+os.environ["OPENAI_API_KEY"],
-           "Content-Type":"application/json"}
-)
-resp = urllib.request.urlopen(req).read().decode()
-text = json.loads(resp)["choices"][0]["message"]["content"]
-open("review.md","w",encoding="utf-8").write(text)
-PY
-
-      - name: Post review comment
-        uses: marocchino/sticky-pull-request-comment@v2
-        with:
-          path: review.md
+          python3 - <<'EOF'
+          import os, json, urllib.request
+          
+          prompt = open('prompt.txt','r',encoding='utf-8',errors='ignore').read()
+          data = {
+              "model": "gpt-4o-mini",
+              "messages": [{"role":"user","content": prompt}],
+              "temperature": 0.2,
+              "max_tokens": 800
+          }
+          req = urllib.request.Request(
+              "https://api.openai.com/v1/chat/completions",
+              data=json.dumps(data).encode(),
+              headers={"Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}",
+                       "Content-Type": "application/json"}
+          )
+          resp = urllib.request.urlopen(req).read().decode()
+          text = json.loads(resp)["choices"][0]["message"]["content"]
+          print(text)
+          with open("review.txt","w",encoding="utf-8") as f:
+              f.write(text)
+          EOF
