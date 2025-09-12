@@ -1,6 +1,6 @@
 # Milkbox AI
 
-## CI Status Panel  
+## CI Status Panel
 
 [![Smoke (Imports)](https://github.com/swanepoelchristo/milkbox-ai/actions/workflows/smoke.yml/badge.svg)](https://github.com/swanepoelchristo/milkbox-ai/actions/workflows/smoke.yml)
 [![Repo Health](https://github.com/swanepoelchristo/milkbox-ai/actions/workflows/repo_health.yml/badge.svg)](https://github.com/swanepoelchristo/milkbox-ai/actions/workflows/repo_health.yml)
@@ -16,16 +16,12 @@ Milkbox AI repository with CI protection:
 - **Repo Health:** checks repo hygiene, dependencies, and reports issues  
 - **Repo Doctor:** enforces repo standards and templates  
 - **Repo Steward:** keeps automation + governance in check  
-- **CodeQL:** scans for security vulnerabilities  
+- **CodeQL:** scans for security vulnerabilities
 
 ---
 
-# Milkbox AI  
-
-Prototype Streamlit app for Milkbox AI.  
-
-## Run locally  
+## Run locally
 
 ```bash
-pip install -r streamlit_app/requirements.txt  
-streamlit run streamlit_app/app.py 
+pip install -r streamlit_app/requirements.txt
+streamlit run streamlit_app/app.py
