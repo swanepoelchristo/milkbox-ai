@@ -1,51 +1,80 @@
 name: PR Nurse
 
+permissions:
+  contents: read
+  pull-requests: write
+
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, reopened, synchronize, ready_for_review]
 
 jobs:
   review:
+    # Skip drafts
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
+    timeout-minutes: 6
+
     steps:
       - uses: actions/checkout@v4
 
       - name: Gather diff
         run: |
           git fetch origin ${{ github.base_ref }} --depth=1
-          git diff origin/${{ github.base_ref }}...HEAD --unified=0 > diff.txt
+          git diff origin/${{ github.base_ref }}...HEAD --unified=0 > diff.txt || true
+          # make sure there's always something to review
+          if [ ! -s diff.txt ]; then
+            echo "# No code changes detected in this PR." > review.md
+            echo "Please add commits or re-open the PR to trigger PR Nurse." >> review.md
+            echo "EMPTY_DIFF=1" >> $GITHUB_ENV
+          fi
 
       - name: Build prompt
+        if: env.EMPTY_DIFF != '1'
         run: |
-          echo 'You are PR Nurse. Review this Git diff. Identify bugs, security risks, duplicate logic, and missing tests. Propose exact unit test names and snippets. Finish with a merge checklist.' > prompt.txt
-          echo '--- DIFF START ---' >> prompt.txt
-          head -c 150000 diff.txt >> prompt.txt
-          echo '\n--- DIFF END ---' >> prompt.txt
+          {
+            echo 'You are **PR Nurse**. Review the Git diff below. Identify bugs, security risks, duplicate logic, and missing tests.'
+            echo 'Propose exact unit test names and short code snippets. Finish with a **merge checklist**.'
+            echo ''
+            echo '--- DIFF START ---'
+            head -c 150000 diff.txt || true
+            echo ''
+            echo '--- DIFF END ---'
+          } > prompt.txt
 
       - name: Ask OpenAI for review
+        if: env.EMPTY_DIFF != '1'
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           python3 - <<'EOF'
           import os, json, urllib.request
-          
           prompt = open('prompt.txt','r',encoding='utf-8',errors='ignore').read()
-          data = {
-              "model": "gpt-4o-mini",
-              "messages": [{"role":"user","content": prompt}],
-              "temperature": 0.2,
-              "max_tokens": 800
+
+          payload = {
+            "model": "gpt-4o-mini",
+            "messages": [{"role":"user","content": prompt}],
+            "temperature": 0.2,
+            "max_tokens": 900
           }
+
           req = urllib.request.Request(
-              "https://api.openai.com/v1/chat/completions",
-              data=json.dumps(data).encode(),
-              headers={"Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}",
-                       "Content-Type": "application/json"}
+            "https://api.openai.com/v1/chat/completions",
+            data=json.dumps(payload).encode(),
+            headers={
+              "Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}",
+              "Content-Type": "application/json"
+            }
           )
           resp = urllib.request.urlopen(req).read().decode()
           text = json.loads(resp)["choices"][0]["message"]["content"]
-          print(text)
-          with open("review.txt","w",encoding="utf-8") as f:
-              f.write(text)
+          with open("review.md","w",encoding="utf-8") as f:
+            f.write(text)
           EOF
+
+      - name: Post review comment
+        # always post (either AI text or "no changes" note)
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          path: review.md
+
